@@ -36,9 +36,49 @@ export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 export OLLAMA_HOST="${OLLAMA_HOST:-}"
 export OLLAMA_API_KEY="${OLLAMA_API_KEY:-}"
 export OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-change-me-now}"
-export SESSION_STATUS_PATH="${SESSION_STATUS_PATH:-/home/dev/session/status.json}"
+export OPENCODE_PORT="${OPENCODE_PORT:-4096}"
+
+# opencode config. Default to the Ollama endpoint already wired via OLLAMA_HOST.
+# A bring-your-own key (pushed by the Worker via PUT /auth/:id at runtime) overrides this.
+mkdir -p /home/dev/.config/opencode
+if [[ -n "${OLLAMA_HOST}" ]]; then
+  ollama_base="${OLLAMA_HOST%/}"
+  case "${ollama_base}" in
+    http://*|https://*) : ;;
+    *) ollama_base="http://${ollama_base}" ;;
+  esac
+  model="${OPENCODE_MODEL:-ollama/qwen2.5-coder:7b}"
+  cat > /home/dev/.config/opencode/opencode.json <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama",
+      "options": { "baseURL": "${ollama_base}/v1" },
+      "models": { "${model#ollama/}": {} }
+    }
+  },
+  "model": "${model}"
+}
+EOF
+elif [[ -n "${OPENCODE_MODEL:-}" ]]; then
+  cat > /home/dev/.config/opencode/opencode.json <<EOF
+{ "\$schema": "https://opencode.ai/config.json", "model": "${OPENCODE_MODEL}" }
+EOF
+fi
 
 cd /home/dev/workspace
-mark-session-status running null "server starting"
+
+# Launch the opencode headless server on loopback; the control server is the only
+# externally reachable port (8080) and gates everything with Basic auth.
+(
+  while true; do
+    opencode serve --hostname 127.0.0.1 --port "${OPENCODE_PORT}" \
+      >> /home/dev/opencode-serve.log 2>&1 || true
+    echo "opencode serve exited, restarting in 2s" >> /home/dev/opencode-serve.log
+    sleep 2
+  done
+) &
 
 exec node /usr/local/share/opencode-phone/control-server.js

@@ -2,13 +2,18 @@ name = "opencode-phone-control"
 main = "src/index.ts"
 compatibility_date = "2026-06-14"
 
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+not_found_handling = "single-page-application"
+
 [vars]
 FLY_APP_NAME = "opencode-phone"
 FLY_MACHINE_ID = "48ee1e1a719978"
 FLY_ORG_SLUG = "personal"
 FLY_BASE_URL = "https://opencode-phone.fly.dev"
 IDLE_STOP_SECONDS = "3600"
-AGENT_STATUS_PATH = "/api/session/status"
 
 [[d1_databases]]
 binding = "DB"

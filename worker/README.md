@@ -1,125 +1,68 @@
-# OpenCode Phone Worker
+# opencode phone — Worker
 
-Cloudflare Worker control plane for the Fly machine.
+Cloudflare Worker control plane + UI for a single Fly machine that runs the **opencode
+headless server** (`opencode serve`). The Worker does three things:
 
-It does four jobs:
+1. **Auth** — gates everything with Basic auth (`CONTROL_PASSWORD`).
+2. **UI** — serves a single-page chat app (`public/`) via Cloudflare Static Assets.
+3. **Proxy + lifecycle** — transparently proxies `/opencode/*` (REST + SSE streaming) and
+   `/terminal/*` (raw ttyd shell) to the Fly box, auto-starts the box on demand, and stops
+   it after idle via a cron.
 
-1. Protects access with Worker-level Basic Auth.
-2. Starts the Fly machine when a session starts.
-3. Proxies `/terminal/*` to the Fly app, including WebSocket traffic for `ttyd`.
-4. Stores session state in D1 and stops the Fly machine when a session is complete or idle too long.
+The chat UI talks to opencode's native API, so replies **stream token-by-token** and session
+history lives in opencode — the Worker no longer screen-scrapes a terminal or mirrors chat
+into D1.
 
-The dashboard and session pages are the primary UI. You can send commands/prompts from Cloudflare to the Fly machine without opening the raw terminal. The Worker stores user inputs and terminal output snapshots in D1 so sessions can be reviewed later.
+## Architecture
 
-The raw terminal remains available at `/terminal/` as an escape hatch.
+```
+Browser ─▶ Worker (auth · SPA · proxy · machine start/stop)
+             ├─▶ /opencode/*  →  Fly :8080 → opencode serve :4096   (REST + SSE /event)
+             └─▶ /terminal/*  →  Fly :8080 → ttyd :7681             (escape hatch)
+Cron */5 ─▶ stop machine when idle past IDLE_STOP_SECONDS
+```
 
-## Create D1
+`api.machines.dev` is touched **only** on explicit start/stop, the cron, and when a proxied
+request finds the box down (auto-start) — never on the per-message path.
+
+## Routes
+
+- `GET /`, `/app.js`, `/styles.css` — the SPA (Static Assets).
+- `/opencode/*` — proxied to opencode's server API (sessions, messages, `/event` SSE, WS).
+- `/terminal/*` — proxied to ttyd (HTTP + WebSocket).
+- `GET /api/machine` — Fly machine status.
+- `POST /api/machine/start` · `POST /api/machine/stop` — explicit lifecycle.
+
+## Setup
 
 ```bash
-cd /Users/noahlopez/Development/Github/opencode-phone/worker
+cd worker
 npm install
-npx wrangler d1 create opencode_phone
+npx wrangler d1 migrations apply opencode_phone --remote   # creates activity + settings tables
 ```
 
-Copy the generated `database_id` into `wrangler.toml`, then apply the migration:
+Secrets:
 
 ```bash
-npm run db:migrate
+npx wrangler secret put CONTROL_PASSWORD              # Basic-auth password for the whole app
+npx wrangler secret put FLY_API_TOKEN                 # to start/stop the machine
+npx wrangler secret put FLY_UPSTREAM_AUTHORIZATION    # "Basic base64(opencode:<OPENCODE_SERVER_PASSWORD>)"
+npx wrangler secret put NOTIFY_WEBHOOK_URL            # optional
 ```
 
-## Set Secrets
+`FLY_UPSTREAM_AUTHORIZATION` is the credential the Worker presents to the Fly control server
+(and, in turn, opencode). Use `opencode` as the username and the Fly machine's
+`OPENCODE_SERVER_PASSWORD` as the password.
 
-```bash
-npx wrangler secret put CONTROL_PASSWORD
-npx wrangler secret put FLY_API_TOKEN
-```
-
-Optional, if the Fly app itself also has Basic Auth enabled:
-
-```bash
-npx wrangler secret put FLY_UPSTREAM_AUTHORIZATION
-```
-
-Use the full header value for `FLY_UPSTREAM_AUTHORIZATION`, for example:
-
-```text
-Basic base64(username:password)
-```
-
-Optional notification webhook:
-
-```bash
-npx wrangler secret put NOTIFY_WEBHOOK_URL
-```
-
-The Worker sends JSON like:
-
-```json
-{ "text": "OpenCode session ... stopped: complete" }
-```
-
-## Deploy
+Deploy:
 
 ```bash
 npm run deploy
 ```
 
-## Routes
+## Model provider (Fly box)
 
-- `GET /` shows a small dashboard.
-- `POST /api/sessions` creates a D1 session and starts the Fly machine.
-- `GET /api/sessions` lists recent sessions.
-- `GET /api/sessions/:id` returns one session.
-- `GET /sessions/:id` shows a session page with a message box, D1 log, and live output.
-- `GET /api/sessions/:id/messages` returns D1 message/output logs.
-- `POST /api/sessions/:id/messages` sends text to the Fly tmux session and logs it in D1.
-- `POST /api/sessions/:id/seen` records browser activity.
-- `POST /api/sessions/:id/complete` marks a session complete and stops the Fly machine.
-- `POST /api/sessions/:id/stop` manually stops the Fly machine.
-- `GET /api/sessions/:id/fly` returns the Fly machine status.
-- `GET /api/session/output` returns recent terminal output from the Fly `tmux` pane.
-- `/terminal/*` proxies to the Fly app.
-
-## Completion Detection
-
-The safest design is for the Fly container to run `ttyd` with a small supervisor around `opencode` or `tmux`.
-
-The supervisor should expose an HTTP status endpoint on the Fly app, for example:
-
-```json
-{
-  "state": "running",
-  "exitCode": null,
-  "updatedAt": "2026-06-14T22:00:00.000Z"
-}
-```
-
-When the CLI exits, it should return:
-
-```json
-{
-  "state": "complete",
-  "exitCode": 0,
-  "updatedAt": "2026-06-14T22:15:00.000Z"
-}
-```
-
-Then set this in `wrangler.toml`:
-
-```toml
-AGENT_STATUS_PATH = "/api/session/status"
-```
-
-Without `AGENT_STATUS_PATH`, the Worker falls back to `IDLE_STOP_SECONDS`. The default is `3600` seconds.
-
-## Fly Config
-
-The Fly app should not use Fly's HTTP autosuspend when this Worker controls shutdown:
-
-```toml
-auto_start_machines = true
-auto_stop_machines = false
-min_machines_running = 0
-```
-
-That lets a task continue after the browser tab closes. The Worker stops the machine later.
+opencode needs a model. Default is **Ollama**, configured from `OLLAMA_HOST` (and optional
+`OPENCODE_MODEL`) in `entrypoint.sh`. **Phase 2** adds a bring-your-own key: a key saved in the
+UI is encrypted (AES-GCM) in D1's `settings` table and pushed to opencode at runtime via
+`PUT /opencode/auth/:provider` — it is never written to the Fly disk.

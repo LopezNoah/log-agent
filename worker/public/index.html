@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>opencode phone</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header class="rail-head">
+        <div class="brand">opencode<span>phone</span></div>
+        <button id="new-session" class="btn primary" title="New session">＋</button>
+      </header>
+      <div id="session-list" class="session-list"></div>
+      <footer class="rail-foot">
+        <div class="machine">
+          <span id="machine-dot" class="dot"></span>
+          <span id="machine-state">…</span>
+        </div>
+        <div class="rail-actions">
+          <button id="machine-toggle" class="btn ghost">Start</button>
+          <a class="btn ghost" href="/terminal/" target="_blank" rel="noopener">Terminal ↗</a>
+        </div>
+      </footer>
+    </aside>
+
+    <main id="main">
+      <div id="thread" class="thread">
+        <div id="empty" class="empty">
+          <h1>opencode phone</h1>
+          <p>A cloud computer for your agents. Pick a session or start a new one.</p>
+        </div>
+      </div>
+      <form id="composer" class="composer" hidden>
+        <textarea id="input" rows="1" placeholder="Message opencode…  (⌘/Ctrl+Enter to send)"></textarea>
+        <button id="send" class="btn primary send" type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
