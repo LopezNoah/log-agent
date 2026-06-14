@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE TABLE IF NOT EXISTS settings (
   id TEXT PRIMARY KEY,
   provider TEXT,
+  model TEXT,
   key_ciphertext TEXT,
   key_iv TEXT,
   updated_at TEXT

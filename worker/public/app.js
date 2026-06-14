@@ -13,11 +13,21 @@ const els = {
   machineDot: $("#machine-dot"),
   machineState: $("#machine-state"),
   machineToggle: $("#machine-toggle"),
+  openSettings: $("#open-settings"),
+  dialog: $("#settings"),
+  sProvider: $("#settings-provider"),
+  sKey: $("#settings-key"),
+  sModel: $("#settings-model"),
+  sStatus: $("#settings-status"),
+  sSave: $("#settings-save"),
+  sClear: $("#settings-clear"),
+  sCancel: $("#settings-cancel"),
 };
 
 const state = {
   sessions: [],
   activeId: null,
+  model: null, // "provider/modelID" from settings; sent with each message when set
   messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
   events: null,
 };
@@ -212,7 +222,7 @@ function renderAssistant(m) {
   let streaming = !m.info.time?.completed;
   for (const id of m.order) {
     const p = m.parts.get(id);
-    if (!p) continue;
+    if (!p || p.ignored) continue;
     if (p.type === "text" || p.type === "reasoning") {
       if (p.text) html += `<div class="text">${escapeHtml(p.text)}</div>`;
     } else if (p.type === "tool") {
@@ -225,8 +235,8 @@ function renderAssistant(m) {
 }
 
 function renderTool(p) {
-  const name = p.tool || p.name || "tool";
   const st = p.state || {};
+  const name = st.title || p.tool || p.name || "tool";
   const status = st.status || p.status || "pending";
   const input = st.input ?? p.input;
   const output = st.output ?? p.output ?? st.error ?? p.error;
@@ -271,11 +281,16 @@ async function send() {
   });
   renderThread(true);
 
+  const payload = { parts: [{ type: "text", text }] };
+  if (state.model && state.model.includes("/")) {
+    const i = state.model.indexOf("/");
+    payload.model = { providerID: state.model.slice(0, i), modelID: state.model.slice(i + 1) };
+  }
   try {
     await api(`/session/${state.activeId}/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ parts: [{ type: "text", text }] }),
+      body: JSON.stringify(payload),
     });
   } catch (e) {
     toast("Send failed: " + e);
@@ -319,6 +334,67 @@ function removeSession(id) {
   renderSessions();
 }
 
+// --------------------------------------------------------------------------- settings (BYO key)
+
+async function loadSettings() {
+  try {
+    const s = await fetch("/api/settings", { credentials: "same-origin" }).then((r) => r.json());
+    if (s.provider) els.sProvider.value = s.provider;
+    els.sModel.value = s.model || "";
+    state.model = s.model || null;
+    els.sStatus.textContent = s.hasKey
+      ? `Key set for ${s.provider}${s.model ? " · " + s.model : ""}. Override or remove below.`
+      : "No key set — using the box default (Ollama).";
+  } catch {
+    els.sStatus.textContent = "Could not load settings.";
+  }
+}
+
+els.openSettings.addEventListener("click", () => { loadSettings(); els.dialog.showModal(); });
+els.sCancel.addEventListener("click", () => els.dialog.close());
+
+els.sSave.addEventListener("click", async () => {
+  const provider = els.sProvider.value;
+  const apiKey = els.sKey.value.trim();
+  const model = els.sModel.value.trim();
+  if (!apiKey) { toast("Enter an API key"); return; }
+  els.sSave.disabled = true;
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, apiKey, model }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const out = await res.json();
+    state.model = out.model || null;
+    els.sKey.value = "";
+    els.dialog.close();
+    toast(out.pushedToMachine ? `Key saved and applied to ${provider}` : `Key saved (applies when the box starts)`);
+  } catch (e) {
+    toast("Save failed: " + e);
+  } finally {
+    els.sSave.disabled = false;
+  }
+});
+
+els.sClear.addEventListener("click", async () => {
+  els.sClear.disabled = true;
+  try {
+    await fetch("/api/settings", { method: "DELETE", credentials: "same-origin" });
+    els.sKey.value = "";
+    els.sModel.value = "";
+    state.model = null;
+    els.dialog.close();
+    toast("Key removed");
+  } catch (e) {
+    toast(String(e));
+  } finally {
+    els.sClear.disabled = false;
+  }
+});
+
 // --------------------------------------------------------------------------- boot
 
 els.newSession.addEventListener("click", () => newSession().catch((e) => toast(String(e))));
@@ -330,6 +406,7 @@ async function boot() {
 }
 
 async function init() {
+  await loadSettings();
   await pollMachine();
   setInterval(pollMachine, 15000);
   const machine = await getMachine();

@@ -9,6 +9,7 @@ interface Env {
   FLY_UPSTREAM_AUTHORIZATION?: string;
   IDLE_STOP_SECONDS?: string;
   NOTIFY_WEBHOOK_URL?: string;
+  SETTINGS_ENC_KEY?: string; // base64 32-byte AES-GCM key for encrypting the BYO API key
 }
 
 const MACHINE_API = "https://api.machines.dev/v1";
@@ -40,6 +41,10 @@ export default {
     if (path === "/api/machine" && request.method === "GET") return machineStatusResponse(env);
     if (path === "/api/machine/start" && request.method === "POST") return startMachineResponse(env);
     if (path === "/api/machine/stop" && request.method === "POST") return stopMachineResponse(env);
+
+    if (path === "/api/settings" && request.method === "GET") return getSettings(env);
+    if (path === "/api/settings" && request.method === "POST") return saveSettings(request, env);
+    if (path === "/api/settings" && request.method === "DELETE") return deleteSettings(env);
 
     if (path.startsWith("/api/")) return json({ error: "not_found" }, 404);
 
@@ -89,6 +94,8 @@ async function proxyToFly(request: Request, env: Env): Promise<Response> {
   if (!healthy) {
     return json({ error: "machine_unavailable", message: "machine did not become ready in time" }, 503);
   }
+  // The box just (re)started, so opencode lost any runtime credential — re-push it.
+  await pushCredential(env).catch(() => {});
 
   // Rebuild init because the body stream may have been consumed by the failed attempt.
   return fetch(buildUpstreamUrl(request, env), buildUpstreamInit(request, env));
@@ -147,6 +154,7 @@ async function machineStatusResponse(env: Env): Promise<Response> {
 async function startMachineResponse(env: Env): Promise<Response> {
   await ensureFlyMachineStarted(env);
   await touchActivity(env);
+  if (await waitForHealth(env)) await pushCredential(env).catch(() => {});
   return json({ ok: true });
 }
 
@@ -236,6 +244,114 @@ async function flyRequest(env: Env, path: string, init: RequestInit = {}): Promi
   if (response.status === 204) return {};
   const text = await response.text();
   return text ? JSON.parse(text) : {};
+}
+
+// ---------------------------------------------------------------------------
+// Settings — bring-your-own provider key (encrypted at rest, AES-GCM)
+// ---------------------------------------------------------------------------
+
+interface SettingsRow {
+  provider: string | null;
+  model: string | null;
+  key_ciphertext: string | null;
+  key_iv: string | null;
+  updated_at: string | null;
+}
+
+async function getSettings(env: Env): Promise<Response> {
+  const row = await readSettings(env);
+  return json({ provider: row?.provider || null, model: row?.model || null, hasKey: !!row?.key_ciphertext });
+}
+
+async function saveSettings(request: Request, env: Env): Promise<Response> {
+  if (!env.SETTINGS_ENC_KEY) return json({ error: "encryption_key_not_configured" }, 500);
+
+  const body = (await request.json().catch(() => ({}))) as { provider?: string; apiKey?: string; model?: string };
+  const provider = (body.provider || "").trim();
+  const apiKey = (body.apiKey || "").trim();
+  const model = (body.model || "").trim() || null;
+  if (!provider || !apiKey) return json({ error: "missing_provider_or_key" }, 400);
+
+  const { ct, iv } = await encryptSecret(env, apiKey);
+  await env.DB.prepare(
+    `INSERT INTO settings (id, provider, model, key_ciphertext, key_iv, updated_at)
+     VALUES ('default', ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
+       key_ciphertext = excluded.key_ciphertext, key_iv = excluded.key_iv,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(provider, model, ct, iv, isoNow())
+    .run();
+
+  // Push to opencode now if the box is up; otherwise it is pushed on next start.
+  const pushed = await pushCredential(env).then(() => true).catch(() => false);
+  return json({ ok: true, provider, model, hasKey: true, pushedToMachine: pushed });
+}
+
+async function deleteSettings(env: Env): Promise<Response> {
+  await env.DB.prepare("DELETE FROM settings WHERE id = 'default'").run();
+  return json({ ok: true });
+}
+
+async function readSettings(env: Env): Promise<SettingsRow | null> {
+  return env.DB.prepare(
+    "SELECT provider, model, key_ciphertext, key_iv, updated_at FROM settings WHERE id = 'default'",
+  ).first<SettingsRow>();
+}
+
+// Decrypt the stored key in memory and push it to opencode (PUT /auth/:provider). The
+// plaintext key is never written to the Fly disk.
+async function pushCredential(env: Env): Promise<void> {
+  const row = await readSettings(env);
+  if (!row?.provider || !row.key_ciphertext || !row.key_iv) return;
+  const key = await decryptSecret(env, row.key_ciphertext, row.key_iv);
+
+  const headers = upstreamHeaders(env);
+  headers.set("Content-Type", "application/json");
+  const res = await fetch(new URL(`/opencode/auth/${encodeURIComponent(row.provider)}`, env.FLY_BASE_URL), {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ type: "api", key }),
+  });
+  if (!res.ok) throw new Error(`auth push failed: ${res.status}`);
+}
+
+async function encryptSecret(env: Env, plaintext: string): Promise<{ ct: string; iv: string }> {
+  const key = await importEncKey(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const buf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return { ct: bytesToBase64(new Uint8Array(buf)), iv: bytesToBase64(iv) };
+}
+
+async function decryptSecret(env: Env, ctB64: string, ivB64: string): Promise<string> {
+  const key = await importEncKey(env);
+  const buf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(ivB64) },
+    key,
+    base64ToBytes(ctB64),
+  );
+  return new TextDecoder().decode(buf);
+}
+
+async function importEncKey(env: Env): Promise<CryptoKey> {
+  if (!env.SETTINGS_ENC_KEY) throw new Error("SETTINGS_ENC_KEY is not configured");
+  return crypto.subtle.importKey("raw", base64ToBytes(env.SETTINGS_ENC_KEY), { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 // ---------------------------------------------------------------------------

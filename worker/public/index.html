@@ -23,6 +23,7 @@
           <button id="machine-toggle" class="btn ghost">Start</button>
           <a class="btn ghost" href="/terminal/" target="_blank" rel="noopener">Terminal ↗</a>
         </div>
+        <button id="open-settings" class="btn ghost settings-btn">⚙ Model key</button>
       </footer>
     </aside>
 
@@ -39,6 +40,36 @@
       </form>
     </main>
   </div>
+
+  <dialog id="settings">
+    <form method="dialog" class="settings-card">
+      <h2>Model key</h2>
+      <p class="hint" id="settings-status">No key set — using the box default (Ollama).</p>
+      <label>Provider
+        <select id="settings-provider">
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="google">Google</option>
+          <option value="groq">Groq</option>
+        </select>
+      </label>
+      <label>API key
+        <input id="settings-key" type="password" autocomplete="off" placeholder="sk-…">
+      </label>
+      <label>Model <span style="text-transform:none">(provider/model)</span>
+        <input id="settings-model" type="text" autocomplete="off" placeholder="anthropic/claude-sonnet-4-6">
+      </label>
+      <p class="hint">Stored encrypted (AES-GCM). Pushed to opencode at runtime — never written to the box's disk.</p>
+      <div class="settings-actions">
+        <button type="button" id="settings-clear" class="btn ghost">Remove key</button>
+        <span style="flex:1"></span>
+        <button type="button" id="settings-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="settings-save" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js" type="module"></script>
 </body>
 </html>
