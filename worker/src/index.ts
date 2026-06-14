@@ -174,6 +174,13 @@ async function reconcile(env: Env): Promise<void> {
   if (state !== "started") return;
 
   const lastActive = await readActivity(env);
+  // No activity timestamp yet (fresh DB, or machine started outside the proxy). Don't treat
+  // "unknown" as "infinitely idle" — seed the clock now and give it a full idle window.
+  if (!lastActive) {
+    await touchActivity(env);
+    return;
+  }
+
   const limitSeconds = Number(env.IDLE_STOP_SECONDS || "3600");
   const idleSeconds = (Date.now() - lastActive) / 1000;
   if (idleSeconds > limitSeconds) {
