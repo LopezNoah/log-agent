@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -eq 0 ]]; then
+  echo "usage: agent-run <command> [args...]" >&2
+  exit 2
+fi
+
+mark-session-status running null "$*"
+set +e
+"$@" &
+pid="$!"
+
+while kill -0 "$pid" 2>/dev/null; do
+  mark-session-status running null "$*"
+  sleep 60
+done &
+heartbeat_pid="$!"
+
+wait "$pid"
+code="$?"
+kill "$heartbeat_pid" 2>/dev/null
+wait "$heartbeat_pid" 2>/dev/null
+set -e
+
+if [[ "$code" -eq 0 ]]; then
+  mark-session-status complete 0 "$*"
+else
+  mark-session-status failed "$code" "$*"
+fi
+
+exit "$code"

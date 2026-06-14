@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mark-session-status failed 1 "${*:-marked failed}"
+echo "Session marked failed. The Cloudflare Worker can stop this machine on its next poll."

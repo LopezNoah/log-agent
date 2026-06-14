@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/home/dev/bin:$PATH"
+mkdir -p /home/dev/workspace /home/dev/session
+
+if ! tmux has-session -t opencode 2>/dev/null; then
+  tmux new-session -d -s opencode -c /home/dev/workspace /home/dev/bin/session-shell
+fi
+
+exec tmux attach-session -t opencode

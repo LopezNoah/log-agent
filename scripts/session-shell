@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/home/dev/bin:$PATH"
+cd /home/dev/workspace
+mark-session-status running null "terminal attached"
+
+cat <<'WELCOME'
+OpenCode Phone terminal
+
+Useful commands:
+  opencode                 Start the interactive OpenCode CLI
+  agent-run <command...>   Run a command and mark the session complete/failed when it exits
+  agent-done [message]     Mark this session complete so the Worker can stop the Fly machine
+  agent-failed [message]   Mark this session failed so the Worker can stop the Fly machine
+
+Repos cloned under /home/dev/workspace persist on the Fly volume.
+WELCOME
+
+exec bash -i

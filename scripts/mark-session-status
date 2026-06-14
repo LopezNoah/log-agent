@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+node - "$@" <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const [state = "running", exitCodeRaw = "null", ...messageParts] = process.argv.slice(2);
+const statusPath = process.env.SESSION_STATUS_PATH || "/home/dev/session/status.json";
+const now = new Date().toISOString();
+const exitCode = exitCodeRaw === "null" || exitCodeRaw === "" ? null : Number(exitCodeRaw);
+
+let previous = {};
+try {
+  previous = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+} catch {}
+
+const status = {
+  ...previous,
+  state,
+  exitCode,
+  message: messageParts.join(" ") || null,
+  cwd: process.cwd(),
+  hostname: os.hostname(),
+  updatedAt: now,
+};
+
+fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+fs.writeFileSync(statusPath, `${JSON.stringify(status, null, 2)}\n`);
+NODE
