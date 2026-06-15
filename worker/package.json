@@ -3,15 +3,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build:css": "tailwindcss -i src/styles/input.css -o public/styles.css --minify",
+    "dev": "npm run build:css && wrangler dev",
+    "deploy": "npm run build:css && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply opencode_phone --local",
     "db:migrate": "wrangler d1 migrations apply opencode_phone --remote",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "@tailwindcss/cli": "^4.3.1",
     "typescript": "latest",
     "wrangler": "latest"
+  },
+  "dependencies": {
+    "hono": "^4.12.25"
   }
 }

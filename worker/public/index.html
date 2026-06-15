@@ -11,47 +11,51 @@
   <script defer src="/vendor/marked-katex.umd.js"></script>
   <script defer src="/vendor/purify.min.js"></script>
 </head>
-<body>
-  <div id="app">
-    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle sessions">☰</button>
-    <div id="scrim" class="scrim" hidden></div>
-    <aside id="sidebar">
-      <header class="rail-head">
-        <div class="brand">opencode<span>phone</span></div>
-        <button id="new-session" class="btn primary" title="New session">＋</button>
+<body class="bg-ink text-zinc-100 antialiased">
+  <div id="app" class="grid h-dvh grid-cols-1 md:grid-cols-[280px_1fr]">
+    <button id="menu-toggle" class="menu-toggle md:hidden" aria-label="Toggle sessions">☰</button>
+    <div id="scrim" class="fixed inset-0 z-[35] bg-black/50 md:hidden" hidden></div>
+
+    <aside id="sidebar" class="sidebar flex flex-col min-h-0 bg-panel border-r border-line">
+      <header class="flex items-center justify-between px-4 py-3 border-b border-line">
+        <div class="font-semibold tracking-tight">opencode<span class="text-muted ml-1 font-medium">phone</span></div>
+        <button id="new-session" class="btn btn-primary h-9 w-9 p-0 text-lg" title="New session">＋</button>
       </header>
-      <div id="session-list" class="session-list"></div>
-      <footer class="rail-foot">
-        <div class="machine">
+      <div id="session-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+      <footer class="border-t border-line px-3.5 py-3">
+        <div class="flex items-center gap-2 text-[13px] text-muted mb-2.5">
           <span id="machine-dot" class="dot"></span>
           <span id="machine-state">…</span>
         </div>
-        <div class="rail-actions">
-          <button id="machine-toggle" class="btn ghost">Start</button>
-          <a class="btn ghost" href="/terminal/" target="_blank" rel="noopener">Terminal ↗</a>
+        <div class="flex gap-2">
+          <button id="machine-toggle" class="btn btn-ghost flex-1">Start</button>
+          <a class="btn btn-ghost flex-1 text-center" href="/terminal/" target="_blank" rel="noopener">Terminal ↗</a>
         </div>
-        <button id="open-settings" class="btn ghost settings-btn">⚙ Model key</button>
+        <button id="open-settings" class="btn btn-ghost w-full mt-2">⚙ Model key</button>
       </footer>
     </aside>
 
-    <main id="main">
-      <div id="thread" class="thread">
-        <div id="empty" class="empty">
-          <h1>opencode phone</h1>
+    <main class="flex flex-col min-w-0 min-h-0">
+      <div id="thread" class="flex-1 overflow-y-auto pt-7 pb-2 max-md:pt-16 min-h-0">
+        <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-muted px-6">
+          <h1 class="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
           <p>A cloud computer for your agents. Pick a session or start a new one.</p>
         </div>
       </div>
+
       <div id="offline-banner" class="offline-banner" hidden></div>
+
       <form id="composer" class="composer" hidden>
-        <div class="composer-inner">
+        <div class="mx-auto w-full max-w-3xl">
           <div class="composer-bar">
-            <textarea id="input" rows="1" placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
-            <div class="composer-controls">
+            <textarea id="input" rows="1" class="w-full bg-transparent outline-none resize-none max-h-56 py-0.5"
+              placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
+            <div class="flex items-center gap-2 mt-2">
               <select id="agent-select" class="agent-select" title="Agent mode"></select>
               <label class="auto-toggle" title="Auto-approve every tool action in this session (no prompts) — for unattended runs">
                 <input type="checkbox" id="auto-approve"> ⚡ Auto-approve
               </label>
-              <button id="send" class="btn primary send" type="submit">Send</button>
+              <button id="send" class="btn btn-primary ml-auto" type="submit">Send</button>
             </div>
           </div>
         </div>
@@ -59,12 +63,12 @@
     </main>
   </div>
 
-  <dialog id="settings">
-    <form method="dialog" class="settings-card">
-      <h2>Model key</h2>
-      <p class="hint" id="settings-status">No key set — using the box default (Ollama).</p>
-      <label>Provider
-        <select id="settings-provider">
+  <dialog id="settings" class="settings-dialog">
+    <form method="dialog" class="p-5 flex flex-col gap-3">
+      <h2 class="text-lg font-semibold m-0">Model key</h2>
+      <p class="text-[12.5px] text-muted m-0" id="settings-status">No key set — using the box default (Ollama).</p>
+      <label class="flex flex-col gap-1.5 text-[13px] text-muted">Provider
+        <select id="settings-provider" class="field">
           <option value="anthropic">Anthropic</option>
           <option value="openai">OpenAI</option>
           <option value="openrouter">OpenRouter</option>
@@ -72,18 +76,18 @@
           <option value="groq">Groq</option>
         </select>
       </label>
-      <label>API key
-        <input id="settings-key" type="password" autocomplete="off" placeholder="sk-…">
+      <label class="flex flex-col gap-1.5 text-[13px] text-muted">API key
+        <input id="settings-key" type="password" autocomplete="off" placeholder="sk-…" class="field">
       </label>
-      <label>Model <span style="text-transform:none">(provider/model)</span>
-        <input id="settings-model" type="text" autocomplete="off" placeholder="anthropic/claude-sonnet-4-6">
+      <label class="flex flex-col gap-1.5 text-[13px] text-muted">Model <span class="normal-case">(provider/model)</span>
+        <input id="settings-model" type="text" autocomplete="off" placeholder="anthropic/claude-sonnet-4-6" class="field">
       </label>
-      <p class="hint">Stored encrypted (AES-GCM). Pushed to opencode at runtime — never written to the box's disk.</p>
-      <div class="settings-actions">
-        <button type="button" id="settings-clear" class="btn ghost">Remove key</button>
-        <span style="flex:1"></span>
-        <button type="button" id="settings-cancel" class="btn ghost">Cancel</button>
-        <button type="button" id="settings-save" class="btn primary">Save</button>
+      <p class="text-[12.5px] text-muted m-0">Stored encrypted (AES-GCM). Pushed to opencode at runtime — never written to the box's disk.</p>
+      <div class="flex items-center gap-2 mt-1.5">
+        <button type="button" id="settings-clear" class="btn btn-ghost">Remove key</button>
+        <span class="flex-1"></span>
+        <button type="button" id="settings-cancel" class="btn btn-ghost">Cancel</button>
+        <button type="button" id="settings-save" class="btn btn-primary">Save</button>
       </div>
     </form>
   </dialog>

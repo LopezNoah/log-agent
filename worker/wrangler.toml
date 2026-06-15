@@ -20,5 +20,13 @@ binding = "DB"
 database_name = "opencode_phone"
 database_id = "8116852a-97ec-4d1c-b7c3-c2a46b65c054"
 
+[[durable_objects.bindings]]
+name = "SYNC"
+class_name = "SyncHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncHub"]
+
 [triggers]
 crons = ["*/5 * * * *"]

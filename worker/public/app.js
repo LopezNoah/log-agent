@@ -38,7 +38,7 @@ const state = {
   autoApprove: localStorage.getItem("oc.autoApprove") !== "0", // default on
   machineOn: false, // whether the Fly box is started (chat is live only when true)
   messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
-  events: null,
+  ws: null, // /sync WebSocket to the SyncHub DO
 };
 
 // --------------------------------------------------------------------------- mobile sidebar
@@ -105,16 +105,16 @@ async function refreshMachine() {
   else if (!state.machineOn && wasOn) onMachineDown();
 }
 
-// Chat is live only when the box is up: connect SSE + load agents, and refresh the
-// currently-open session with live data.
+// When the box comes up: load agents and nudge the DO to (re)connect its opencode bridge,
+// then refresh the open session. Live updates always arrive over the same /sync WebSocket.
 async function onMachineUp() {
   await loadAgents();
-  connectEvents();
-  if (state.activeId) await selectSession(state.activeId);
+  syncSend({ type: "sync" });
+  if (state.activeId) syncSend({ type: "open", sessionID: state.activeId });
 }
 
 function onMachineDown() {
-  if (state.events) { state.events.close(); state.events = null; }
+  /* nothing — the /sync WebSocket stays connected; it just stops receiving live events */
 }
 
 // Composer is shown only when the box is up and a session is open. When the box is off we
@@ -262,43 +262,25 @@ els.autoApprove.addEventListener("change", () => {
   if (state.activeId) applyPermission(state.activeId, state.autoApprove);
 });
 
-async function loadSessions() {
-  // Cache-backed: served from D1 when the box is off, refreshed from opencode when it's on.
-  // Never wakes the machine.
-  let list = [];
-  try {
-    const res = await fetch("/api/sessions", { credentials: "same-origin" }).then((r) => r.json());
-    list = res.sessions || [];
-  } catch (e) {
-    toast("Could not load sessions: " + e);
-  }
-  state.sessions = list.sort(
-    (a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0),
-  );
-  renderSessions();
-}
-
 async function newSession() {
   const s = await api("/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   state.sessions.unshift(s);
   await applyPermission(s.id, state.autoApprove);
+  syncSend({ type: "sync" }); // nudge the DO to pick up the new session
   await selectSession(s.id);
 }
 
-async function selectSession(id) {
+// History comes from the DO over the /sync WebSocket: request it, render when it arrives
+// (onSyncMessage → "messages"). Works whether the box is on or off.
+function selectSession(id) {
   closeSidebar();
   state.activeId = id;
   state.messages.clear();
   renderSessions();
   els.empty.style.display = "none";
   updateMode();
-  try {
-    const res = await fetch(`/api/sessions/${id}/messages`, { credentials: "same-origin" }).then((r) => r.json());
-    for (const item of res.messages || []) ingestMessage(item);
-  } catch (e) {
-    toast(String(e));
-  }
   renderThread(true);
+  syncSend({ type: "open", sessionID: id });
   if (state.machineOn) els.input.focus();
 }
 
@@ -461,18 +443,50 @@ async function send() {
   }
 }
 
-// --------------------------------------------------------------------------- events (SSE)
+// --------------------------------------------------------------------------- sync (WebSocket to the SyncHub DO)
 
-function connectEvents() {
-  if (state.events) state.events.close();
-  const es = new EventSource("/opencode/event", { withCredentials: true });
-  state.events = es;
-  es.onmessage = (ev) => {
-    let payload;
-    try { payload = JSON.parse(ev.data); } catch { return; }
-    handleEvent(payload);
+// The DO is always reachable (Cloudflare-side), so we connect regardless of the box state.
+// It serves the cached session list + messages and relays opencode events when the box is up.
+function connectSync() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/sync`);
+  state.ws = ws;
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    onSyncMessage(msg);
   };
-  es.onerror = () => { /* EventSource auto-reconnects */ };
+  ws.onclose = () => {
+    state.ws = null;
+    setTimeout(connectSync, 2000); // auto-reconnect with backoff
+  };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+function syncSend(obj) {
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(obj));
+}
+
+function onSyncMessage(msg) {
+  if (msg.type === "snapshot" || msg.type === "sessions") {
+    setSessions(msg.sessions || []);
+    if (!state.activeId && state.sessions[0]) selectSession(state.sessions[0].id);
+  } else if (msg.type === "messages") {
+    if (msg.sessionID === state.activeId) {
+      state.messages.clear();
+      for (const item of msg.messages || []) ingestMessage(item);
+      renderThread(true);
+    }
+  } else if (msg.type === "event") {
+    handleEvent(msg.event);
+  }
+}
+
+function setSessions(list) {
+  state.sessions = list.sort(
+    (a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0),
+  );
+  renderSessions();
 }
 
 function handleEvent(payload) {
@@ -481,15 +495,8 @@ function handleEvent(payload) {
   if (type === "message.updated") onMessageUpdated(props.info || props.message);
   else if (type === "message.part.updated") onPartUpdated(props.part);
   else if (type === "message.removed" && props.messageID) { state.messages.delete(props.messageID); renderThread(); }
-  else if (type === "session.updated") syncSession(props.info || props.session);
+  else if (type === "session.updated" || type === "session.created") syncSession(props.info || props.session);
   else if (type === "session.deleted" || type === "session.removed") removeSession(props.info?.id || props.sessionID);
-  else if (type === "session.idle" && (props.sessionID === state.activeId)) refreshCache(props.sessionID);
-}
-
-// After a response finishes, ask the Worker to re-read this session so D1 has the latest
-// (so it's readable later with the box off). Fire-and-forget.
-function refreshCache(sessionId) {
-  fetch(`/api/sessions/${sessionId}/messages`, { credentials: "same-origin" }).catch(() => {});
 }
 
 function syncSession(s) {
@@ -573,10 +580,9 @@ els.newSession.addEventListener("click", () => newSession().catch((e) => toast(S
 async function init() {
   setupMarkdown();
   await loadSettings();
-  await refreshMachine();          // sets machineOn; connects SSE + agents if the box is up
+  connectSync();                   // DO is always reachable; snapshot drives the rail + first select
+  await refreshMachine();          // sets machineOn; loads agents + nudges the DO bridge if up
   setInterval(refreshMachine, 15000);
-  await loadSessions();            // cache-backed; works with the box off
-  if (!state.activeId && state.sessions[0]) await selectSession(state.sessions[0].id);
 }
 
 // --------------------------------------------------------------------------- utils
