@@ -10,6 +10,7 @@ const els = {
   composer: $("#composer"),
   input: $("#input"),
   agentSelect: $("#agent-select"),
+  autoApprove: $("#auto-approve"),
   newSession: $("#new-session"),
   machineDot: $("#machine-dot"),
   machineState: $("#machine-state"),
@@ -30,6 +31,7 @@ const state = {
   activeId: null,
   model: null, // "provider/modelID" from settings; sent with each message when set
   agent: null, // selected primary agent ("build" | "plan" | …); sent with each message
+  autoApprove: localStorage.getItem("oc.autoApprove") !== "0", // default on
   messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
   events: null,
 };
@@ -188,6 +190,31 @@ async function loadAgents() {
 
 els.agentSelect.addEventListener("change", () => { state.agent = els.agentSelect.value; });
 
+// Auto-approve: a per-session permission ruleset. Allow-all means opencode runs every tool
+// (bash, edit, …) without prompting — stored with the session, so it holds even after the
+// machine restarts mid-task. The Plan agent still blocks edits regardless.
+const ALLOW_ALL = [{ permission: "*", pattern: "**", action: "allow" }];
+
+async function applyPermission(id, allow) {
+  if (!id) return;
+  try {
+    await api(`/session/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ permission: allow ? ALLOW_ALL : [] }),
+    });
+  } catch (e) {
+    toast("Auto-approve update failed: " + e);
+  }
+}
+
+els.autoApprove.checked = state.autoApprove;
+els.autoApprove.addEventListener("change", () => {
+  state.autoApprove = els.autoApprove.checked;
+  localStorage.setItem("oc.autoApprove", state.autoApprove ? "1" : "0");
+  if (state.activeId) applyPermission(state.activeId, state.autoApprove);
+});
+
 async function loadSessions() {
   const list = await api("/session");
   state.sessions = (Array.isArray(list) ? list : []).sort(
@@ -199,6 +226,7 @@ async function loadSessions() {
 async function newSession() {
   const s = await api("/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   state.sessions.unshift(s);
+  await applyPermission(s.id, state.autoApprove);
   await selectSession(s.id);
 }
 
