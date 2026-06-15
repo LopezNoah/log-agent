@@ -78,7 +78,9 @@ async function api(path, opts = {}) {
 
 async function getMachine() {
   try {
-    const { machine } = await ensureAuthed(await fetch("/api/machine", { credentials: "same-origin" })).then((r) => r.json());
+    const res = ensureAuthed(await fetch("/api/machine", { credentials: "same-origin" }));
+    if (!res.ok) return "unknown";
+    const { machine } = await res.json();
     return String(machine?.state || "unknown");
   } catch {
     return "unknown";
@@ -88,7 +90,9 @@ async function getMachine() {
 // The default LLM connector's model is what we attach to each outgoing message.
 async function loadDefaultModel() {
   try {
-    const { connectors } = await ensureAuthed(await fetch("/api/connectors", { credentials: "same-origin" })).then((r) => r.json());
+    const res = ensureAuthed(await fetch("/api/connectors", { credentials: "same-origin" }));
+    if (!res.ok) return;
+    const { connectors } = await res.json();
     const def = (connectors || []).find((c) => c.type === "llm" && c.isDefault);
     state.model = def?.config?.model || null;
   } catch {
