@@ -6,6 +6,8 @@ import {
   flyMachineStatus,
   upstreamHeaders,
 } from "./fly";
+import { registerAuthRoutes, requireSession } from "./auth";
+import { fanOutNotification, getDefaultLlmCredential, registerConnectorRoutes } from "./connectors";
 
 export { SyncHub } from "./sync-hub";
 
@@ -15,31 +17,11 @@ const HEALTH_POLL_MS = 1_500;
 const app = new Hono<{ Bindings: Env }>();
 
 // ---------------------------------------------------------------------------
-// Auth (Basic) on everything
+// Auth: signed session cookie on everything except the login page + its assets
 // ---------------------------------------------------------------------------
 
-app.use("*", async (c, next) => {
-  if (!isAuthorized(c.req.raw, c.env)) {
-    return new Response("Unauthorized", {
-      status: 401,
-      headers: { "WWW-Authenticate": 'Basic realm="opencode-phone"' },
-    });
-  }
-  await next();
-});
-
-function isAuthorized(request: Request, env: Env): boolean {
-  if (!env.CONTROL_PASSWORD) return false;
-  const header = request.headers.get("Authorization");
-  if (!header?.startsWith("Basic ")) return false;
-  try {
-    const decoded = atob(header.slice("Basic ".length));
-    const sep = decoded.indexOf(":");
-    return (sep === -1 ? decoded : decoded.slice(sep + 1)) === env.CONTROL_PASSWORD;
-  } catch {
-    return false;
-  }
-}
+app.use("*", requireSession);
+registerAuthRoutes(app);
 
 // ---------------------------------------------------------------------------
 // Sync WebSocket -> the SyncHub Durable Object
@@ -86,40 +68,10 @@ app.post("/api/machine/stop", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Settings: bring-your-own provider key (AES-GCM at rest)
+// Connectors: BYOK credentials (LLM providers, GitHub, Fly.io, notifications)
 // ---------------------------------------------------------------------------
 
-app.get("/api/settings", async (c) => {
-  const row = await readSettings(c.env);
-  return c.json({ provider: row?.provider || null, model: row?.model || null, hasKey: !!row?.key_ciphertext });
-});
-
-app.post("/api/settings", async (c) => {
-  if (!c.env.SETTINGS_ENC_KEY) return c.json({ error: "encryption_key_not_configured" }, 500);
-  const body = (await c.req.json().catch(() => ({}))) as { provider?: string; apiKey?: string; model?: string };
-  const provider = (body.provider || "").trim();
-  const apiKey = (body.apiKey || "").trim();
-  const model = (body.model || "").trim() || null;
-  if (!provider || !apiKey) return c.json({ error: "missing_provider_or_key" }, 400);
-
-  const { ct, iv } = await encryptSecret(c.env, apiKey);
-  await c.env.DB.prepare(
-    `INSERT INTO settings (id, provider, model, key_ciphertext, key_iv, updated_at)
-     VALUES ('default', ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, model = excluded.model,
-       key_ciphertext = excluded.key_ciphertext, key_iv = excluded.key_iv, updated_at = excluded.updated_at`,
-  )
-    .bind(provider, model, ct, iv, isoNow())
-    .run();
-
-  const pushed = await pushCredential(c.env).then(() => true).catch(() => false);
-  return c.json({ ok: true, provider, model, hasKey: true, pushedToMachine: pushed });
-});
-
-app.delete("/api/settings", async (c) => {
-  await c.env.DB.prepare("DELETE FROM settings WHERE id = 'default'").run();
-  return c.json({ ok: true });
-});
+registerConnectorRoutes(app);
 
 // Unmatched API routes are 404 JSON; everything else is the static SPA.
 app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
@@ -216,80 +168,36 @@ async function readActivity(env: Env): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Settings storage + provider credential push + crypto
+// Provider credential push to opencode (default LLM connector)
 // ---------------------------------------------------------------------------
 
-interface SettingsRow {
-  provider: string | null;
-  model: string | null;
-  key_ciphertext: string | null;
-  key_iv: string | null;
-  updated_at: string | null;
-}
-
-async function readSettings(env: Env): Promise<SettingsRow | null> {
-  return env.DB.prepare(
-    "SELECT provider, model, key_ciphertext, key_iv, updated_at FROM settings WHERE id = 'default'",
-  ).first<SettingsRow>();
-}
-
 async function pushCredential(env: Env): Promise<void> {
-  const row = await readSettings(env);
-  if (!row?.provider || !row.key_ciphertext || !row.key_iv) return;
-  const key = await decryptSecret(env, row.key_ciphertext, row.key_iv);
+  const cred = await getDefaultLlmCredential(env);
+  if (!cred) return;
 
   const headers = upstreamHeaders(env);
   headers.set("Content-Type", "application/json");
-  const res = await fetch(new URL(`/opencode/auth/${encodeURIComponent(row.provider)}`, env.FLY_BASE_URL), {
+  const res = await fetch(new URL(`/opencode/auth/${encodeURIComponent(cred.provider)}`, env.FLY_BASE_URL), {
     method: "PUT",
     headers,
-    body: JSON.stringify({ type: "api", key }),
+    body: JSON.stringify({ type: "api", key: cred.key }),
   });
   if (!res.ok) throw new Error(`auth push failed: ${res.status}`);
-}
-
-async function encryptSecret(env: Env, plaintext: string): Promise<{ ct: string; iv: string }> {
-  const key = await importEncKey(env);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const buf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
-  return { ct: bytesToBase64(new Uint8Array(buf)), iv: bytesToBase64(iv) };
-}
-
-async function decryptSecret(env: Env, ctB64: string, ivB64: string): Promise<string> {
-  const key = await importEncKey(env);
-  const buf = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(ivB64) }, key, base64ToBytes(ctB64));
-  return new TextDecoder().decode(buf);
-}
-
-async function importEncKey(env: Env): Promise<CryptoKey> {
-  if (!env.SETTINGS_ENC_KEY) throw new Error("SETTINGS_ENC_KEY is not configured");
-  return crypto.subtle.importKey("raw", base64ToBytes(env.SETTINGS_ENC_KEY), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
 }
 
 // ---------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------
 
+// Fan out to every configured notification connector, plus the legacy env webhook if set.
 async function notify(env: Env, text: string): Promise<void> {
+  await fanOutNotification(env, text).catch(() => {});
   if (!env.NOTIFY_WEBHOOK_URL) return;
   await fetch(env.NOTIFY_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
-  });
+  }).catch(() => {});
 }
 
 function sleep(ms: number): Promise<void> {

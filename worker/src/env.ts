@@ -13,4 +13,5 @@ export interface Env {
   IDLE_STOP_SECONDS?: string;
   NOTIFY_WEBHOOK_URL?: string;
   SETTINGS_ENC_KEY?: string;
+  SESSION_SECRET?: string;
 }

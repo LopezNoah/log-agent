@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · opencode phone</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="bg-ink text-zinc-100 antialiased">
+  <main class="login-wrap">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="login-brand">opencode<span class="text-muted ml-1 font-medium">phone</span></div>
+      <p class="text-[13px] text-muted m-0">A cloud computer for your agents.</p>
+      <label class="flex flex-col gap-1.5 text-[13px] text-muted mt-2">Password
+        <input id="login-password" type="password" autocomplete="current-password" autofocus
+               placeholder="••••••••" class="field text-base">
+      </label>
+      <p id="login-error" class="login-error" hidden></p>
+      <button id="login-submit" type="submit" class="btn btn-primary w-full mt-1 py-2.5 text-base">Sign in</button>
+    </form>
+  </main>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const pw = document.getElementById("login-password");
+    const err = document.getElementById("login-error");
+    const btn = document.getElementById("login-submit");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      btn.disabled = true;
+      btn.textContent = "Signing in…";
+      try {
+        const res = await fetch("/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw.value }),
+        });
+        if (res.ok) {
+          const next = new URLSearchParams(location.search).get("next");
+          location.href = next && next.startsWith("/") ? next : "/";
+          return;
+        }
+        err.textContent = res.status === 401 ? "Incorrect password." : "Sign in failed. Try again.";
+        err.hidden = false;
+      } catch {
+        err.textContent = "Network error. Try again.";
+        err.hidden = false;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+        pw.select();
+      }
+    });
+  </script>
+</body>
+</html>

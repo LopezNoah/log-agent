@@ -2,6 +2,8 @@
 // All /opencode/* calls are same-origin; the browser carries the Basic-auth credential
 // it already used to load this page. Live updates arrive over the /opencode/event SSE stream.
 
+import { openSettings } from "./settings.js";
+
 const $ = (sel) => document.querySelector(sel);
 const els = {
   sidebar: $("#sidebar"),
@@ -20,14 +22,6 @@ const els = {
   machineState: $("#machine-state"),
   machineToggle: $("#machine-toggle"),
   openSettings: $("#open-settings"),
-  dialog: $("#settings"),
-  sProvider: $("#settings-provider"),
-  sKey: $("#settings-key"),
-  sModel: $("#settings-model"),
-  sStatus: $("#settings-status"),
-  sSave: $("#settings-save"),
-  sClear: $("#settings-clear"),
-  sCancel: $("#settings-cancel"),
 };
 
 const state = {
@@ -70,18 +64,35 @@ function renderMarkdown(text) {
 
 // --------------------------------------------------------------------------- api
 
+// Any 401 means the session cookie expired — bounce to the login page.
+function ensureAuthed(res) {
+  if (res.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); throw new Error("unauthorized"); }
+  return res;
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch("/opencode" + path, { credentials: "same-origin", ...opts });
+  const res = ensureAuthed(await fetch("/opencode" + path, { credentials: "same-origin", ...opts }));
   if (!res.ok) throw new Error(`${opts.method || "GET"} ${path} → ${res.status}`);
   return res.status === 204 ? null : res.json();
 }
 
 async function getMachine() {
   try {
-    const { machine } = await fetch("/api/machine", { credentials: "same-origin" }).then((r) => r.json());
+    const { machine } = await ensureAuthed(await fetch("/api/machine", { credentials: "same-origin" })).then((r) => r.json());
     return String(machine?.state || "unknown");
   } catch {
     return "unknown";
+  }
+}
+
+// The default LLM connector's model is what we attach to each outgoing message.
+async function loadDefaultModel() {
+  try {
+    const { connectors } = await ensureAuthed(await fetch("/api/connectors", { credentials: "same-origin" })).then((r) => r.json());
+    const def = (connectors || []).find((c) => c.type === "llm" && c.isDefault);
+    state.model = def?.config?.model || null;
+  } catch {
+    /* leave state.model as-is */
   }
 }
 
@@ -512,66 +523,11 @@ function removeSession(id) {
   renderSessions();
 }
 
-// --------------------------------------------------------------------------- settings (BYO key)
+// --------------------------------------------------------------------------- settings overlay
 
-async function loadSettings() {
-  try {
-    const s = await fetch("/api/settings", { credentials: "same-origin" }).then((r) => r.json());
-    if (s.provider) els.sProvider.value = s.provider;
-    els.sModel.value = s.model || "";
-    state.model = s.model || null;
-    els.sStatus.textContent = s.hasKey
-      ? `Key set for ${s.provider}${s.model ? " · " + s.model : ""}. Override or remove below.`
-      : "No key set — using the box default (Ollama).";
-  } catch {
-    els.sStatus.textContent = "Could not load settings.";
-  }
-}
-
-els.openSettings.addEventListener("click", () => { loadSettings(); els.dialog.showModal(); });
-els.sCancel.addEventListener("click", () => els.dialog.close());
-
-els.sSave.addEventListener("click", async () => {
-  const provider = els.sProvider.value;
-  const apiKey = els.sKey.value.trim();
-  const model = els.sModel.value.trim();
-  if (!apiKey) { toast("Enter an API key"); return; }
-  els.sSave.disabled = true;
-  try {
-    const res = await fetch("/api/settings", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, apiKey, model }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    const out = await res.json();
-    state.model = out.model || null;
-    els.sKey.value = "";
-    els.dialog.close();
-    toast(out.pushedToMachine ? `Key saved and applied to ${provider}` : `Key saved (applies when the box starts)`);
-  } catch (e) {
-    toast("Save failed: " + e);
-  } finally {
-    els.sSave.disabled = false;
-  }
-});
-
-els.sClear.addEventListener("click", async () => {
-  els.sClear.disabled = true;
-  try {
-    await fetch("/api/settings", { method: "DELETE", credentials: "same-origin" });
-    els.sKey.value = "";
-    els.sModel.value = "";
-    state.model = null;
-    els.dialog.close();
-    toast("Key removed");
-  } catch (e) {
-    toast(String(e));
-  } finally {
-    els.sClear.disabled = false;
-  }
-});
+els.openSettings.addEventListener("click", () => { closeSidebar(); openSettings(); });
+// The settings module fires this whenever connectors change; re-read the active model.
+window.addEventListener("connectors-changed", () => { loadDefaultModel(); });
 
 // --------------------------------------------------------------------------- boot
 
@@ -579,7 +535,7 @@ els.newSession.addEventListener("click", () => newSession().catch((e) => toast(S
 
 async function init() {
   setupMarkdown();
-  await loadSettings();
+  await loadDefaultModel();
   connectSync();                   // DO is always reachable; snapshot drives the rail + first select
   await refreshMachine();          // sets machineOn; loads agents + nudges the DO bridge if up
   setInterval(refreshMachine, 15000);
