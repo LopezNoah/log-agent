@@ -8,6 +8,9 @@
 //
 // Unknown types and invalid JSON degrade to a plain code block, so normal chats are untouched.
 
+const PREVIEW_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-top-navigation-by-user-activation";
+const PREVIEW_ALLOW = "clipboard-read; clipboard-write; fullscreen";
+
 // --------------------------------------------------------------------------- parsing
 
 // Split assistant text into ordered markdown / ui segments. Incomplete (still-streaming)
@@ -50,7 +53,9 @@ const WIDGETS = {
   table: tableWidget,
   status: statusWidget,
   diff: diffWidget,
+  "file-explorer": fileExplorerWidget,
   preview: previewWidget,
+  sandbox: sandboxWidget,
   command: commandWidget,
   form: formWidget,
 };
@@ -207,6 +212,98 @@ function diffWidget(spec, ctx) {
   return root;
 }
 
+function fileExplorerWidget(spec, ctx) {
+  const props = spec.props || {};
+  const { root, body, actions } = shell(ctx, spec, { title: props.root || "File Explorer", icon: "▤" });
+  const refresh = el("button", "widget-act", "↻");
+  refresh.title = "Refresh";
+  refresh.disabled = !ctx.machineOn;
+  actions.prepend(refresh);
+
+  async function load(path = "") {
+    const st = ctx.state.get() || { expanded: { "": true } };
+    ctx.state.set({ ...st, loading: true, error: "" });
+    paint();
+    try {
+      const data = await ctx.fsTree(path, path ? 1 : 2);
+      const next = ctx.state.get() || { expanded: { "": true } };
+      const tree = path ? replaceTreeNode(next.tree, data.tree) : data.tree;
+      ctx.state.set({ ...next, tree, loading: false, error: "" });
+    } catch (e) {
+      const next = ctx.state.get() || {};
+      ctx.state.set({ ...next, loading: false, error: e.message || String(e) });
+    }
+    paint();
+  }
+
+  async function open(path) {
+    const st = ctx.state.get() || {};
+    ctx.state.set({ ...st, selected: path, content: "Loading…" });
+    paint();
+    try {
+      const file = await ctx.fsFile(path);
+      ctx.state.set({ ...ctx.state.get(), selected: path, content: file.content || "" });
+    } catch (e) {
+      ctx.state.set({ ...ctx.state.get(), selected: path, content: e.message || String(e) });
+    }
+    paint();
+  }
+
+  async function toggle(node) {
+    const st = ctx.state.get() || { expanded: { "": true } };
+    const expanded = { ...(st.expanded || {}) };
+    expanded[node.path] = !expanded[node.path];
+    ctx.state.set({ ...st, expanded, selected: node.path });
+    if (expanded[node.path] && !node.children) await load(node.path);
+    else paint();
+  }
+
+  function paintNode(node, depth) {
+    const isDir = node.type === "directory";
+    const st = ctx.state.get() || {};
+    const expanded = !!(st.expanded || {})[node.path];
+    const wrap = el("div");
+    const row = el("button", "artifact-file-row" + (st.selected === node.path ? " selected" : ""));
+    row.style.paddingLeft = `${8 + depth * 14}px`;
+    row.append(el("span", "artifact-file-caret", isDir ? (expanded ? "▾" : "▸") : ""));
+    row.append(el("span", "artifact-file-name", node.name || node.path || "/"));
+    row.addEventListener("click", () => isDir ? toggle(node) : open(node.path));
+    wrap.append(row);
+    if (isDir && expanded) for (const child of node.children || []) wrap.append(paintNode(child, depth + 1));
+    return wrap;
+  }
+
+  function paint() {
+    const st = ctx.state.get() || {};
+    body.innerHTML = "";
+    if (st.loading) body.append(el("div", "artifact-pending", "Loading files…"));
+    if (st.error) body.append(el("div", "text-bad", st.error));
+    const tree = st.tree;
+    if (!tree) return;
+    const list = el("div", "artifact-file-list");
+    for (const child of tree.children || []) list.append(paintNode(child, 0));
+    body.append(list);
+    if (st.selected && st.content != null) {
+      body.append(el("div", "artifact-file-path", st.selected));
+      body.append(el("pre", "artifact-file-content", st.content));
+    }
+  }
+
+  refresh.addEventListener("click", () => load(""));
+  const initial = ctx.state.get() || {};
+  if (!ctx.machineOn) {
+    body.append(el("div", "artifact-pending", "Start the machine to browse files."));
+  } else if (!initial.tree && !initial.loading) load("");
+  else paint();
+  return root;
+}
+
+function replaceTreeNode(root, node) {
+  if (!root || root.path === node.path) return node;
+  if (!Array.isArray(root.children)) return root;
+  return { ...root, children: root.children.map((child) => replaceTreeNode(child, node)) };
+}
+
 const DIFF_CELL_LIMIT = 400_000; // n*m guard so big files don't hang the LCS
 
 function computeDiff(a, b) {
@@ -277,26 +374,160 @@ function splitLine(text, t) {
 
 function previewWidget(spec, ctx) {
   const props = spec.props || {};
-  const { root, body } = shell(ctx, spec, { title: props.framework ? `Preview · ${props.framework}` : "Preview", icon: "▷" });
-  const top = el("div", "preview-top");
-  top.append(pill(props.status || "unknown"));
-  if (props.url) top.append(el("span", "preview-url", props.url));
-  body.append(top);
+  const title = props.title || (props.framework ? `${props.framework} preview` : "Preview");
+  const { root, body } = shell(ctx, spec, { title, icon: "▷" });
+  const previewId = props.id || "default";
+  const src = safeFrameUrl(props.url || previewUrl(previewId, props.visibility));
+  let frame;
+
+  const chrome = el("div", "preview-chrome");
+  const dots = el("div", "preview-dots");
+  dots.append(el("span"), el("span"), el("span"));
+  const address = el("div", "preview-address", src || "No preview URL");
+  const status = pill(props.status || (src ? "ready" : "waiting"));
+  chrome.append(dots, address, status);
+  body.append(chrome);
+
+  if (src) {
+    const stage = el("div", "preview-stage desktop");
+    frame = document.createElement("iframe");
+    frame.className = "preview-frame";
+    frame.loading = "lazy";
+    frame.referrerPolicy = "no-referrer";
+    frame.setAttribute("sandbox", PREVIEW_SANDBOX);
+    frame.setAttribute("allow", PREVIEW_ALLOW);
+    frame.allowFullscreen = true;
+    frame.src = src;
+    frame.title = title;
+    stage.append(frame);
+    body.append(stage);
+  } else {
+    body.append(el("div", "preview-empty", "Start a preview server and provide a local preview URL to show it here."));
+  }
 
   const row = el("div", "widget-buttons");
   const open = el("button", "btn btn-primary", "Open ↗");
-  open.disabled = !props.url;
-  open.addEventListener("click", () => ctx.openUrl(props.url));
+  open.disabled = !src;
+  open.addEventListener("click", () => ctx.openUrl(src));
   row.append(open);
-  // Restart/Stop need the preview-control API (a later phase); show them disabled for now.
-  for (const label of ["Refresh", "Restart", "Stop"]) {
-    const b = el("button", "btn btn-ghost", label);
-    b.disabled = true;
-    b.title = "Preview control API coming soon";
-    row.append(b);
+
+  const refresh = el("button", "btn btn-ghost", "Refresh");
+  refresh.disabled = !frame;
+  refresh.addEventListener("click", () => reloadFrame(frame, src));
+  row.append(refresh);
+
+  if (frame) {
+    const device = el("button", "btn btn-ghost", "Mobile");
+    device.addEventListener("click", () => {
+      const stage = frame.parentElement;
+      const mobile = !stage.classList.contains("mobile");
+      stage.classList.toggle("mobile", mobile);
+      stage.classList.toggle("desktop", !mobile);
+      device.textContent = mobile ? "Desktop" : "Mobile";
+    });
+    row.append(device);
   }
+
+  const payload = { id: previewId, cwd: props.cwd || "", command: props.command || "", port: props.port };
+  if (props.visibility) payload.visibility = props.visibility;
+  const start = el("button", "btn btn-ghost", "Start");
+  start.disabled = !ctx.previewStart;
+  start.addEventListener("click", () => runPreviewAction(start, "Starting…", () => ctx.previewStart(payload), status, frame, src, ctx));
+  row.append(start);
+
+  const restart = el("button", "btn btn-ghost", "Restart");
+  restart.disabled = !ctx.previewRestart;
+  restart.addEventListener("click", () => runPreviewAction(restart, "Restarting…", () => ctx.previewRestart(payload), status, frame, src, ctx));
+  row.append(restart);
+
+  const stop = el("button", "btn btn-ghost", "Stop");
+  stop.disabled = !ctx.previewStop;
+  stop.addEventListener("click", () => runPreviewAction(stop, "Stopping…", () => ctx.previewStop(previewId), status, frame, src, ctx));
+  row.append(stop);
   body.append(row);
   return root;
+}
+
+function previewUrl(id = "default", visibility = "private") {
+  const safeId = String(id || "default").replace(/[^A-Za-z0-9_-]/g, "") || "default";
+  if (visibility === "public") return `/preview/public/${safeId}/`;
+  return safeId === "default" ? "/preview/" : `/preview/${safeId}/`;
+}
+
+async function runPreviewAction(button, busyText, action, status, frame, src, ctx) {
+  const prev = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  status.textContent = busyText.replace(/…$/, "").toLowerCase();
+  status.className = "widget-pill amber";
+  try {
+    const result = await action();
+    const next = result?.preview?.status || (result?.ok ? "ready" : "unknown");
+    status.textContent = next;
+    status.className = "widget-pill " + statusClass(next);
+    reloadFrame(frame, src);
+    ctx.toast("Preview " + next);
+  } catch (e) {
+    status.textContent = "error";
+    status.className = "widget-pill bad";
+    ctx.toast("Preview action failed: " + (e.message || e));
+  } finally {
+    button.disabled = false;
+    button.textContent = prev;
+  }
+}
+
+function reloadFrame(frame, src) {
+  if (!frame || !src) return;
+  frame.src = src + (src.includes("?") ? "&" : "?") + "_t=" + Date.now();
+}
+
+function sandboxWidget(spec, ctx) {
+  const props = spec.props || {};
+  const title = props.title || props.component || "Sandbox";
+  const { root, body } = shell(ctx, spec, { title, icon: "▣" });
+  const src = safeFrameUrl(props.url || previewUrl(props.id, props.visibility));
+  const summary = el("div", "sandbox-summary");
+  summary.append(pill(props.status || (src ? "isolated" : "configured")));
+  summary.append(el("span", null, "Iframe sandbox: scripts may run, but no same-origin privileges, cookies, auth storage, or direct host APIs are exposed."));
+  body.append(summary);
+
+  if (src) {
+    const frame = document.createElement("iframe");
+    frame.className = "sandbox-frame";
+    frame.loading = "lazy";
+    frame.referrerPolicy = "no-referrer";
+    frame.setAttribute("sandbox", PREVIEW_SANDBOX);
+    frame.setAttribute("allow", PREVIEW_ALLOW);
+    frame.allowFullscreen = true;
+    frame.src = src;
+    frame.title = title;
+    body.append(frame);
+  } else {
+    body.append(el("div", "preview-empty", "Sandbox registration is ready. Provide a local URL from an approved preview endpoint to render it."));
+  }
+
+  const actions = el("div", "widget-buttons");
+  const open = el("button", "btn btn-primary", "Open ↗");
+  open.disabled = !src;
+  open.addEventListener("click", () => ctx.openUrl(src));
+  actions.append(open);
+  body.append(actions);
+  return root;
+}
+
+function safeFrameUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, location.origin);
+    if (url.origin === location.origin && (url.pathname === "/preview" || url.pathname.startsWith("/preview/"))) {
+      return url.pathname + url.search + url.hash;
+    }
+  } catch {
+    /* ignore invalid URLs */
+  }
+  return "";
 }
 
 function commandWidget(spec, ctx) {

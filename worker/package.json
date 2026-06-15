@@ -3,9 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "npm run build:app && npm run build:css",
+    "build:app": "vite build",
     "build:css": "tailwindcss -i src/styles/input.css -o public/styles.css --minify",
-    "dev": "npm run build:css && wrangler dev",
-    "deploy": "npm run build:css && wrangler deploy",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply opencode_phone --local",
     "db:migrate": "wrangler d1 migrations apply opencode_phone --remote",
     "typecheck": "tsc --noEmit"
@@ -14,6 +16,7 @@
     "@cloudflare/workers-types": "latest",
     "@tailwindcss/cli": "^4.3.1",
     "typescript": "latest",
+    "vite": "^7.0.0",
     "wrangler": "^4.100.0"
   },
   "dependencies": {

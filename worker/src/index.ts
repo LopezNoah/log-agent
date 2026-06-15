@@ -51,6 +51,10 @@ const proxy = (c: any) => {
 };
 app.all("/opencode", proxy);
 app.all("/opencode/*", proxy);
+app.all("/fs", proxy);
+app.all("/fs/*", proxy);
+app.all("/preview", proxy);
+app.all("/preview/*", proxy);
 app.all("/terminal", proxy);
 app.all("/terminal/*", proxy);
 
@@ -169,8 +173,11 @@ function buildUpstreamUrl(request: Request, env: Env): string {
 
 function buildUpstreamInit(request: Request, env: Env): RequestInit {
   const headers = new Headers(request.headers);
+  const source = new URL(request.url);
   headers.delete("Host");
   headers.delete("Cookie");
+  headers.set("X-Forwarded-Host", source.host);
+  headers.set("X-Forwarded-Proto", source.protocol.replace(":", ""));
   if (env.FLY_UPSTREAM_AUTHORIZATION) headers.set("Authorization", env.FLY_UPSTREAM_AUTHORIZATION);
   return { method: request.method, headers, body: request.body, redirect: "manual" };
 }

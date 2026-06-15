@@ -28,9 +28,18 @@ request finds the box down (auto-start) — never on the per-message path.
 
 ## Routes
 
-- `GET /`, `/app.js`, `/styles.css` — the SPA (Static Assets).
+- `GET /`, `/assets/app.js`, `/styles.css` — the SPA (Static Assets).
 - `GET /login` · `POST /login` · `GET|POST /logout` — session login page + cookie lifecycle.
 - `/opencode/*` — proxied to opencode's server API (sessions, messages, `/event` SSE, WS).
+- `/fs/tree`, `/fs/file`, `/fs/mkdir`, `/fs/path`, `/fs/rename` — proxied filesystem API
+  rooted at `/home/dev/workspace` on the Fly box.
+- `/preview/`, `/preview/:id/` — private same-origin app previews. Serve the configured preview
+  workspace statically by default, or proxy a running preview process.
+- `/preview/public/:id/` — public preview content, only when that preview is marked public.
+- `/preview/start`, `/preview/list`, `/preview/restart`, `/preview/stop`,
+  `POST /preview/:id/visibility`, `DELETE /preview/:id`, `DELETE /preview/all` — basic preview
+  process lifecycle and metadata. Preview metadata persists on the box by ID; visibility is private
+  unless explicitly set to `public`.
 - `/terminal/*` — proxied to ttyd (HTTP + WebSocket).
 - `GET /api/machine` — Fly machine status.
 - `POST /api/machine/start` · `POST /api/machine/stop` — explicit lifecycle.
@@ -101,10 +110,14 @@ back to a code block, so normal replies are unaffected ("not every chat is like 
 ```
 ````
 
-Phase 1 widget types: `checklist`, `table`, `status`, `diff` (inline/split), `preview`,
-`command`, `form` (submit posts a message back to the agent). Any widget can be **pinned** (📌) to
-keep it at the top of the thread; pins persist per-session in `localStorage`. Coming later:
-`file-explorer` + Monaco `editor` (with `/fs/*` box APIs) and a live preview-control system.
+Phase 1 widget types: `checklist`, `table`, `status`, `diff` (inline/split), `file-explorer`,
+`preview`, `sandbox`, `command`, `form` (submit posts a message back to the agent). Any widget can be
+**pinned** (📌) to keep it at the top of the thread; pins persist per-session in `localStorage`.
+`preview` renders a basic v0-style iframe shell for `/preview/*` URLs and can start the basic preview
+server. `sandbox` embeds only approved preview URLs in an iframe without same-origin privileges; it
+does not execute model HTML. Static preview HTML is rewritten so root-relative assets stay under the
+preview base path instead of escaping to the parent app.
+Coming later: Monaco `editor` and a live preview-control system.
 
 To make an agent actually emit these, add the protocol to its instructions (e.g. opencode
 `AGENTS.md` on the box): *"When a structured UI helps, emit a fenced `ui` block with

@@ -4,103 +4,13 @@
 
 import { openSettings } from "./settings.js";
 import { mountArtifact, parseRichText } from "./artifacts.js";
-
-const $ = (sel) => document.querySelector(sel);
-const els = {
-  sidebar: $("#sidebar"),
-  menuToggle: $("#menu-toggle"),
-  scrim: $("#scrim"),
-  sessionList: $("#session-list"),
-  thread: $("#thread"),
-  usageTotal: $("#usage-total"),
-  empty: $("#empty"),
-  composer: $("#composer"),
-  offlineBanner: $("#offline-banner"),
-  input: $("#input"),
-  agentSelect: $("#agent-select"),
-  autoApprove: $("#auto-approve"),
-  newSession: $("#new-session"),
-  machineDot: $("#machine-dot"),
-  machineState: $("#machine-state"),
-  machineToggle: $("#machine-toggle"),
-  openSettings: $("#open-settings"),
-};
-
-const state = {
-  sessions: [],
-  activeId: null,
-  model: null, // "provider/modelID" from settings; sent with each message when set
-  agent: null, // selected primary agent ("build" | "plan" | …); sent with each message
-  autoApprove: localStorage.getItem("oc.autoApprove") !== "0", // default on
-  machineOn: false, // whether the Fly box is started (chat is live only when true)
-  messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
-  ws: null, // /sync WebSocket to the SyncHub DO
-};
-
-// --------------------------------------------------------------------------- mobile sidebar
-
-function openSidebar() { els.sidebar.classList.add("open"); els.scrim.hidden = false; }
-function closeSidebar() { els.sidebar.classList.remove("open"); els.scrim.hidden = true; }
-els.menuToggle.addEventListener("click", () =>
-  els.sidebar.classList.contains("open") ? closeSidebar() : openSidebar());
-els.scrim.addEventListener("click", closeSidebar);
-
-// --------------------------------------------------------------------------- markdown + latex
-
-function setupMarkdown() {
-  if (!window.marked) return;
-  window.marked.setOptions({ gfm: true, breaks: true });
-  if (window.markedKatex) {
-    window.marked.use(window.markedKatex({ throwOnError: false, nonStandard: true }));
-  }
-}
-
-function renderMarkdown(text) {
-  if (!window.marked) return `<div class="text">${escapeHtml(text)}</div>`;
-  let html = window.marked.parse(text || "");
-  if (window.DOMPurify) {
-    html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true, mathMl: true, svg: true } });
-  }
-  return `<div class="md">${html}</div>`;
-}
-
-// --------------------------------------------------------------------------- api
-
-// Any 401 means the session cookie expired — bounce to the login page.
-function ensureAuthed(res) {
-  if (res.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); throw new Error("unauthorized"); }
-  return res;
-}
-
-async function api(path, opts = {}) {
-  const res = ensureAuthed(await fetch("/opencode" + path, { credentials: "same-origin", ...opts }));
-  if (!res.ok) throw new Error(`${opts.method || "GET"} ${path} → ${res.status}`);
-  return res.status === 204 ? null : res.json();
-}
-
-async function getMachine() {
-  try {
-    const res = ensureAuthed(await fetch("/api/machine", { credentials: "same-origin" }));
-    if (!res.ok) return "unknown";
-    const { machine } = await res.json();
-    return String(machine?.state || "unknown");
-  } catch {
-    return "unknown";
-  }
-}
-
-// The default LLM connector's model is what we attach to each outgoing message.
-async function loadDefaultModel() {
-  try {
-    const res = ensureAuthed(await fetch("/api/connectors", { credentials: "same-origin" }));
-    if (!res.ok) return;
-    const { connectors } = await res.json();
-    const def = (connectors || []).find((c) => c.type === "llm" && c.isDefault);
-    state.model = def?.config?.model || null;
-  } catch {
-    /* leave state.model as-is */
-  }
-}
+import { $, els } from "./dom.js";
+import { setupGithubProject } from "./github-project.js";
+import { state } from "./state.js";
+import { api, ensureAuthed, fsApi, getMachine, loadDefaultModel } from "./api.js";
+import { setupMarkdown, renderMarkdown } from "./markdown.js";
+import { closeSidebar, setupMobile } from "./mobile.js";
+import { escapeHtml, sleep, stringify, toast } from "./utils.js";
 
 // --------------------------------------------------------------------------- machine
 
@@ -142,12 +52,257 @@ async function refreshMachine(known) {
 // then refresh the open session. Live updates always arrive over the same /sync WebSocket.
 async function onMachineUp() {
   await loadAgents();
+  await refreshFiles().catch(() => {});
   syncSend({ type: "sync" });
   if (state.activeId) syncSend({ type: "open", sessionID: state.activeId });
 }
 
 function onMachineDown() {
-  /* nothing — the /sync WebSocket stays connected; it just stops receiving live events */
+  state.files.root = null;
+  state.files.nodes.clear();
+  state.files.selected = "";
+  state.files.selectedType = "directory";
+  state.files.selectedMtime = "";
+  state.files.dirty = false;
+  renderFiles("Start the machine to browse files.");
+}
+
+// --------------------------------------------------------------------------- filesystem view
+
+els.filesRefresh.addEventListener("click", () => refreshFiles(true).catch((e) => toast("File refresh failed: " + e.message)));
+els.filesNewFile.addEventListener("click", () => createFile().catch((e) => toast("Create file failed: " + e.message)));
+els.filesNewFolder.addEventListener("click", () => createFolder().catch((e) => toast("Create folder failed: " + e.message)));
+els.fileSave.addEventListener("click", () => saveOpenFile().catch((e) => toast("Save failed: " + e.message)));
+els.fileRename.addEventListener("click", () => renameSelected().catch((e) => toast("Rename failed: " + e.message)));
+els.fileDelete.addEventListener("click", () => deleteSelected().catch((e) => toast("Delete failed: " + e.message)));
+els.fileEditorContent.addEventListener("input", () => { state.files.dirty = true; els.fileSave.disabled = false; });
+
+let filesRefreshTimer = 0;
+
+function scheduleFilesRefresh(delay = 700) {
+  if (!state.machineOn) return;
+  clearTimeout(filesRefreshTimer);
+  filesRefreshTimer = setTimeout(() => {
+    refreshFiles(false, { silent: true }).catch(() => {});
+  }, delay);
+}
+
+async function refreshFiles(force = false, options = {}) {
+  if (!state.machineOn) { renderFiles("Start the machine to browse files."); return; }
+  if (state.files.loading) return;
+  const silent = options.silent === true;
+  state.files.loading = true;
+  if (!silent) renderFiles("Loading files…");
+  try {
+    state.files.nodes.clear();
+    await loadTree("", force ? 2 : 1);
+    for (const path of [...state.files.expanded]) {
+      if (path) await loadTree(path, 1).catch(() => {});
+    }
+    await syncOpenFileAfterRefresh();
+    state.files.loading = false;
+    renderFiles();
+  } catch (e) {
+    state.files.loading = false;
+    if (!silent) renderFiles("Could not load files.");
+    throw e;
+  } finally {
+    state.files.loading = false;
+  }
+}
+
+async function loadTree(path, depth = 1) {
+  const data = await fsApi(`/fs/tree?path=${encodeURIComponent(path)}&depth=${depth}`);
+  if (!data?.tree) return;
+  if (!path) state.files.root = data.tree;
+  indexFileNode(data.tree);
+}
+
+function indexFileNode(node) {
+  state.files.nodes.set(node.path || "", node);
+  for (const child of node.children || []) indexFileNode(child);
+}
+
+function renderFiles(status) {
+  const disabled = !state.machineOn;
+  els.filesRefresh.disabled = disabled;
+  els.filesNewFile.disabled = disabled;
+  els.filesNewFolder.disabled = disabled;
+  els.fileRename.disabled = disabled || !state.files.selected;
+  els.fileDelete.disabled = disabled || !state.files.selected;
+  els.fileSave.disabled = disabled || !state.files.dirty || state.files.selectedType !== "file";
+  els.filesStatus.textContent = status || "";
+  els.filesStatus.hidden = !els.filesStatus.textContent;
+  els.filesTree.innerHTML = "";
+  if (!state.files.root) {
+    els.fileEditor.hidden = true;
+    return;
+  }
+  const rootChildren = state.files.root.children || [];
+  for (const child of rootChildren) els.filesTree.append(renderFileNode(child, 0));
+  if (!rootChildren.length) {
+    els.filesStatus.hidden = false;
+    els.filesStatus.textContent = "Workspace is empty.";
+  }
+}
+
+function renderFileNode(node, depth) {
+  const wrap = document.createElement("div");
+  const row = document.createElement("button");
+  const isDir = node.type === "directory";
+  const expanded = state.files.expanded.has(node.path);
+  row.className = "file-row" + (node.path === state.files.selected ? " selected" : "") + (isDir ? " dir" : " file");
+  row.style.paddingLeft = `${8 + depth * 16}px`;
+  row.innerHTML = `<span class="file-caret">${isDir ? (expanded ? "▾" : "▸") : ""}</span><span class="file-icon">${isDir ? "□" : "·"}</span><span class="file-name">${escapeHtml(node.name)}</span>`;
+  row.addEventListener("click", async () => {
+    if (isDir) await toggleFolder(node.path);
+    else await openFile(node.path);
+  });
+  wrap.append(row);
+  if (isDir && expanded) {
+    for (const child of node.children || []) wrap.append(renderFileNode(child, depth + 1));
+  }
+  return wrap;
+}
+
+async function toggleFolder(path) {
+  const wasExpanded = state.files.expanded.has(path);
+  state.files.selected = path;
+  state.files.selectedType = "directory";
+  els.fileEditor.hidden = true;
+  if (wasExpanded) state.files.expanded.delete(path);
+  else {
+    state.files.expanded.add(path);
+    const node = state.files.nodes.get(path);
+    if (!node?.children) await loadTree(path, 1);
+  }
+  renderFiles();
+}
+
+async function openFile(path) {
+  if (state.files.dirty && !confirm("Discard unsaved file changes?")) return;
+  const file = await fsApi(`/fs/file?path=${encodeURIComponent(path)}`);
+  state.files.selected = path;
+  state.files.selectedType = "file";
+  state.files.selectedMtime = file.mtime || state.files.nodes.get(path)?.mtime || "";
+  state.files.dirty = false;
+  els.fileEditor.hidden = false;
+  els.fileEditorPath.textContent = path;
+  els.fileEditorContent.value = file.content || "";
+  renderFiles();
+}
+
+async function saveOpenFile() {
+  if (!state.files.selected || state.files.selectedType !== "file") return;
+  await fsApi("/fs/file", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: state.files.selected, content: els.fileEditorContent.value }),
+  });
+  state.files.dirty = false;
+  toast("Saved " + state.files.selected);
+  await refreshFiles();
+}
+
+async function createFile() {
+  if (!state.machineOn) return;
+  const base = currentDirectory();
+  const rel = prompt("New file path", base ? base + "/untitled.txt" : "untitled.txt");
+  if (!rel) return;
+  await fsApi("/fs/file", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: rel, content: "" }),
+  });
+  state.files.expanded.add(dirname(rel));
+  await refreshFiles(true);
+  await openFile(rel);
+}
+
+async function createFolder() {
+  if (!state.machineOn) return;
+  const base = currentDirectory();
+  const rel = prompt("New folder path", base ? base + "/new-folder" : "new-folder");
+  if (!rel) return;
+  await fsApi("/fs/mkdir", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: rel }),
+  });
+  state.files.expanded.add(dirname(rel));
+  await refreshFiles(true);
+}
+
+async function renameSelected() {
+  const from = state.files.selected;
+  if (!from) return;
+  const to = prompt("Rename path", from);
+  if (!to || to === from) return;
+  await fsApi("/fs/rename", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to }),
+  });
+  state.files.expanded.add(dirname(to));
+  state.files.expanded.delete(from);
+  state.files.selected = to;
+  if (state.files.selectedType === "file") els.fileEditorPath.textContent = to;
+  await refreshFiles(true);
+}
+
+async function deleteSelected() {
+  const rel = state.files.selected;
+  if (!rel) return;
+  const isDir = state.files.selectedType === "directory";
+  const detail = isDir ? " and everything inside it" : "";
+  if (!confirm(`Delete ${rel}${detail}? This can't be undone.`)) return;
+  await fsApi(`/fs/path?path=${encodeURIComponent(rel)}`, { method: "DELETE" });
+  state.files.selected = "";
+  state.files.selectedType = "directory";
+  state.files.selectedMtime = "";
+  state.files.dirty = false;
+  els.fileEditor.hidden = true;
+  await refreshFiles(true);
+}
+
+async function syncOpenFileAfterRefresh() {
+  const selected = state.files.selected;
+  if (!selected) return;
+  const node = state.files.nodes.get(selected);
+  if (!node) {
+    state.files.selected = "";
+    state.files.selectedType = "directory";
+    state.files.selectedMtime = "";
+    state.files.dirty = false;
+    els.fileEditor.hidden = true;
+    return;
+  }
+  if (state.files.selectedType !== "file") return;
+  if (node.type !== "file") {
+    state.files.selectedType = node.type;
+    state.files.selectedMtime = node.mtime || "";
+    els.fileEditor.hidden = true;
+    return;
+  }
+  if (state.files.dirty) return;
+  if (state.files.selectedMtime && node.mtime === state.files.selectedMtime) return;
+  const file = await fsApi(`/fs/file?path=${encodeURIComponent(selected)}`);
+  if (state.files.selected !== selected || state.files.dirty) return;
+  state.files.selectedMtime = file.mtime || node.mtime || "";
+  els.fileEditor.hidden = false;
+  els.fileEditorPath.textContent = selected;
+  els.fileEditorContent.value = file.content || "";
+}
+
+function currentDirectory() {
+  if (!state.files.selected) return "";
+  return state.files.selectedType === "directory" ? state.files.selected : dirname(state.files.selected);
+}
+
+function dirname(rel) {
+  const parts = String(rel || "").split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
 }
 
 // Composer is shown only when the box is up and a session is open. When the box is off we
@@ -391,6 +546,7 @@ function onMessageUpdated(info) {
     for (const key of [...state.messages.keys()]) if (key.startsWith("local-")) state.messages.delete(key);
   }
   ingestMessage({ info });
+  if (info.role === "assistant" && info.time?.completed) scheduleFilesRefresh(250);
   if (belongsToActive(info)) renderThread();
 }
 
@@ -402,6 +558,7 @@ function onPartUpdated(part) {
     state.messages.set(part.messageID, entry);
   }
   upsertPart(entry, part);
+  if (part.type === "tool") scheduleFilesRefresh(part.state?.status === "completed" || part.status === "completed" ? 250 : 900);
   if (belongsToActive(entry.info) || part.sessionID === state.activeId) renderThread();
 }
 
@@ -502,6 +659,25 @@ function artifactCtx(spec) {
     sendText: (t) => sendText(t),
     toast,
     openUrl: (u) => { if (u) window.open(u, "_blank", "noopener"); },
+    fsTree: (path = "", depth = 1) => fsApi(`/fs/tree?path=${encodeURIComponent(path)}&depth=${depth}`),
+    fsFile: (path) => fsApi(`/fs/file?path=${encodeURIComponent(path)}`),
+    previewStart: (props = {}) => fsApi("/preview/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(props),
+    }),
+    previewRestart: (props = {}) => fsApi("/preview/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(props),
+    }),
+    previewStop: (id = "default") => fsApi("/preview/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }),
+    previewList: () => fsApi("/preview/list"),
+    machineOn: state.machineOn,
     isPinned: (aid) => pinsFor(state.activeId).some((p) => p.__id === aid),
     togglePin: (s) => togglePin(s),
   };
@@ -745,26 +921,19 @@ window.addEventListener("connectors-changed", () => { loadDefaultModel(); });
 els.newSession.addEventListener("click", () => newSession().catch((e) => toast(String(e))));
 
 async function init() {
+  setupMobile();
   setupMarkdown();
+  setupGithubProject();
+  renderFiles("Start the machine to browse files.");
   await loadDefaultModel();
   connectSync();                   // DO is always reachable; snapshot drives the rail + first select
   await refreshMachine();          // sets machineOn; loads agents + nudges the DO bridge if up
   setInterval(refreshMachine, 15000);
+  setInterval(() => {
+    if (state.machineOn && document.visibilityState !== "hidden") refreshFiles(false, { silent: true }).catch(() => {});
+  }, 5000);
 }
 
 // --------------------------------------------------------------------------- utils
-
-function stringify(v) { return typeof v === "string" ? v : JSON.stringify(v, null, 2); }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-function toast(msg) {
-  const t = document.createElement("div");
-  t.className = "toast";
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 4000);
-}
 
 init();

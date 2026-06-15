@@ -63,7 +63,9 @@ use the types below.
 - `table` — props `{ title?, columns: [..], rows: [[..], ..] }`.
 - `status` — props `{ title?, <label>: <state>, ... }`. States like "running", "ok", "error".
 - `diff` — props `{ filename, before, after }`. Show file changes.
-- `preview` — props `{ status, url, framework? }`. A running app/preview.
+- `file-explorer` — props `{ root, selected? }`. Show the workspace filesystem.
+- `preview` — props `{ id?, status, url?, framework?, command?, cwd?, visibility? }`. A running app/preview. Private by default. Use a stable `id` and omit `url` unless you need a custom preview path.
+- `sandbox` — props `{ id?, title?, status?, url?, visibility? }`. A same-origin iframe sandbox; defaults to the preview URL for `id`.
 - `command` — props `{ command, status, stdout?, stderr? }`. A command and its output.
 - `form` — props `{ title, submitLabel?, fields: [{ name, label, type, options?, placeholder?, required? }] }`.
   Submitted values are sent back to you as a normal message.

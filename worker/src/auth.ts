@@ -8,7 +8,7 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // Reachable without a session: the login page itself, logout, and the static assets the
 // login page needs to render. Everything else is gated.
-const PUBLIC_PREFIXES = ["/login", "/logout", "/styles.css", "/vendor/", "/favicon"];
+const PUBLIC_PREFIXES = ["/login", "/logout", "/styles.css", "/vendor/", "/favicon", "/preview/public/"];
 
 function isPublic(path: string): boolean {
   return PUBLIC_PREFIXES.some((p) => path === p || path.startsWith(p));

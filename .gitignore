@@ -1,3 +1,5 @@
 node_modules/
 .wrangler/
 .dev.vars
+worker/public/app.js
+worker/public/assets/
