@@ -42,6 +42,10 @@ export default {
     if (path === "/api/machine/start" && request.method === "POST") return startMachineResponse(env);
     if (path === "/api/machine/stop" && request.method === "POST") return stopMachineResponse(env);
 
+    if (path === "/api/sessions" && request.method === "GET") return listSessionsCached(env);
+    const msgMatch = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+    if (msgMatch && request.method === "GET") return listMessagesCached(env, msgMatch[1]);
+
     if (path === "/api/settings" && request.method === "GET") return getSettings(env);
     if (path === "/api/settings" && request.method === "POST") return saveSettings(request, env);
     if (path === "/api/settings" && request.method === "DELETE") return deleteSettings(env);
@@ -173,6 +177,10 @@ async function reconcile(env: Env): Promise<void> {
   const state = String(machine?.state || "");
   if (state !== "started") return;
 
+  // Keep the D1 session cache fresh while the box is up (best-effort).
+  const live = await fetchUpstreamJson<any[]>(env, "/opencode/session");
+  if (Array.isArray(live)) await cacheSessions(env, live);
+
   const lastActive = await readActivity(env);
   // No activity timestamp yet (fresh DB, or machine started outside the proxy). Don't treat
   // "unknown" as "infinitely idle" — seed the clock now and give it a full idle window.
@@ -205,6 +213,93 @@ async function touchActivity(env: Env): Promise<void> {
 async function readActivity(env: Env): Promise<number> {
   const row = await env.DB.prepare("SELECT last_active_at FROM activity WHERE id = 'machine'").first<{ last_active_at: string }>();
   return row?.last_active_at ? new Date(row.last_active_at).getTime() : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Session cache (D1) — lets the dashboard be browsed with the box stopped
+// ---------------------------------------------------------------------------
+
+// The Fly machine has autostart=true, so any request to FLY_BASE_URL wakes it. We therefore
+// only read live data when the machine is ALREADY started; otherwise we serve the D1 cache
+// and leave the box asleep.
+async function isMachineStarted(env: Env): Promise<boolean> {
+  const machine = await flyMachineStatus(env).catch(() => null);
+  return String(machine?.state || "") === "started";
+}
+
+async function fetchUpstreamJson<T>(env: Env, path: string): Promise<T | null> {
+  try {
+    const res = await fetch(new URL(path, env.FLY_BASE_URL), { headers: upstreamHeaders(env) });
+    if (!res.ok) return null;
+    return await res.json<T>();
+  } catch {
+    return null;
+  }
+}
+
+async function listSessionsCached(env: Env): Promise<Response> {
+  if (await isMachineStarted(env)) {
+    const live = await fetchUpstreamJson<any[]>(env, "/opencode/session");
+    if (Array.isArray(live)) {
+      await cacheSessions(env, live);
+      return json({ source: "live", machine: "started", sessions: live });
+    }
+  }
+  return json({ source: "cache", machine: "stopped", sessions: await readCachedSessions(env) });
+}
+
+async function listMessagesCached(env: Env, sessionId: string): Promise<Response> {
+  if (await isMachineStarted(env)) {
+    const live = await fetchUpstreamJson<any[]>(env, `/opencode/session/${encodeURIComponent(sessionId)}/message`);
+    if (Array.isArray(live)) {
+      await cacheMessages(env, sessionId, live);
+      return json({ source: "live", messages: live });
+    }
+  }
+  return json({ source: "cache", messages: await readCachedMessages(env, sessionId) });
+}
+
+async function cacheSessions(env: Env, list: any[]): Promise<void> {
+  if (!list.length) return;
+  const now = isoNow();
+  const stmts = list.map((s) =>
+    env.DB.prepare(
+      `INSERT INTO sessions (id, title, created_at, updated_at, data, synced_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at,
+         data = excluded.data, synced_at = excluded.synced_at`,
+    ).bind(s.id, s.title ?? null, msToIso(s.time?.created), msToIso(s.time?.updated) || now, JSON.stringify(s), now),
+  );
+  await env.DB.batch(stmts);
+}
+
+async function readCachedSessions(env: Env): Promise<unknown[]> {
+  const rows = await env.DB.prepare("SELECT data FROM sessions ORDER BY updated_at DESC LIMIT 200").all<{ data: string }>();
+  return rows.results.map((r) => JSON.parse(r.data));
+}
+
+async function cacheMessages(env: Env, sessionId: string, messages: any[]): Promise<void> {
+  await env.DB.prepare("DELETE FROM session_messages WHERE session_id = ?").bind(sessionId).run();
+  if (!messages.length) return;
+  const stmts = messages.map((m, i) =>
+    env.DB.prepare(
+      "INSERT INTO session_messages (session_id, message_id, idx, data) VALUES (?, ?, ?, ?)",
+    ).bind(sessionId, m.info?.id ?? String(i), i, JSON.stringify(m)),
+  );
+  await env.DB.batch(stmts);
+}
+
+async function readCachedMessages(env: Env, sessionId: string): Promise<unknown[]> {
+  const rows = await env.DB.prepare(
+    "SELECT data FROM session_messages WHERE session_id = ? ORDER BY idx ASC",
+  )
+    .bind(sessionId)
+    .all<{ data: string }>();
+  return rows.results.map((r) => JSON.parse(r.data));
+}
+
+function msToIso(ms: unknown): string | null {
+  return typeof ms === "number" ? new Date(ms).toISOString() : null;
 }
 
 // ---------------------------------------------------------------------------

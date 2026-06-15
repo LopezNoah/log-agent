@@ -4,10 +4,14 @@
 
 const $ = (sel) => document.querySelector(sel);
 const els = {
+  sidebar: $("#sidebar"),
+  menuToggle: $("#menu-toggle"),
+  scrim: $("#scrim"),
   sessionList: $("#session-list"),
   thread: $("#thread"),
   empty: $("#empty"),
   composer: $("#composer"),
+  offlineBanner: $("#offline-banner"),
   input: $("#input"),
   agentSelect: $("#agent-select"),
   autoApprove: $("#auto-approve"),
@@ -32,9 +36,18 @@ const state = {
   model: null, // "provider/modelID" from settings; sent with each message when set
   agent: null, // selected primary agent ("build" | "plan" | …); sent with each message
   autoApprove: localStorage.getItem("oc.autoApprove") !== "0", // default on
+  machineOn: false, // whether the Fly box is started (chat is live only when true)
   messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
   events: null,
 };
+
+// --------------------------------------------------------------------------- mobile sidebar
+
+function openSidebar() { els.sidebar.classList.add("open"); els.scrim.hidden = false; }
+function closeSidebar() { els.sidebar.classList.remove("open"); els.scrim.hidden = true; }
+els.menuToggle.addEventListener("click", () =>
+  els.sidebar.classList.contains("open") ? closeSidebar() : openSidebar());
+els.scrim.addEventListener("click", closeSidebar);
 
 // --------------------------------------------------------------------------- markdown + latex
 
@@ -82,8 +95,44 @@ function renderMachine(stateStr) {
   els.machineToggle.dataset.action = running ? "stop" : "start";
 }
 
-async function pollMachine() {
-  renderMachine(await getMachine());
+async function refreshMachine() {
+  const stateStr = await getMachine();
+  const wasOn = state.machineOn;
+  state.machineOn = stateStr === "started";
+  renderMachine(stateStr);
+  updateMode();
+  if (state.machineOn && !wasOn) await onMachineUp();
+  else if (!state.machineOn && wasOn) onMachineDown();
+}
+
+// Chat is live only when the box is up: connect SSE + load agents, and refresh the
+// currently-open session with live data.
+async function onMachineUp() {
+  await loadAgents();
+  connectEvents();
+  if (state.activeId) await selectSession(state.activeId);
+}
+
+function onMachineDown() {
+  if (state.events) { state.events.close(); state.events = null; }
+}
+
+// Composer is shown only when the box is up and a session is open. When the box is off we
+// show a read-only banner so saved sessions stay browsable.
+function updateMode() {
+  if (state.machineOn) {
+    els.offlineBanner.hidden = true;
+    els.composer.hidden = !state.activeId;
+  } else {
+    els.composer.hidden = true;
+    els.offlineBanner.hidden = !state.activeId;
+    if (state.activeId) {
+      els.offlineBanner.innerHTML =
+        `<span>Machine is off — viewing the saved copy (read-only).</span>
+         <button class="btn primary" id="banner-start" type="button">Start machine to chat</button>`;
+      $("#banner-start").addEventListener("click", () => els.machineToggle.click());
+    }
+  }
 }
 
 els.machineToggle.addEventListener("click", async () => {
@@ -97,16 +146,14 @@ els.machineToggle.addEventListener("click", async () => {
     toast(String(e));
   } finally {
     els.machineToggle.disabled = false;
-    await pollMachine();
+    await refreshMachine();
   }
 });
 
 async function waitForStarted() {
   for (let i = 0; i < 40; i++) {
-    if ((await getMachine()) === "started") {
-      await boot();
-      return;
-    }
+    await refreshMachine();
+    if (state.machineOn) return;
     await sleep(2000);
   }
 }
@@ -216,8 +263,16 @@ els.autoApprove.addEventListener("change", () => {
 });
 
 async function loadSessions() {
-  const list = await api("/session");
-  state.sessions = (Array.isArray(list) ? list : []).sort(
+  // Cache-backed: served from D1 when the box is off, refreshed from opencode when it's on.
+  // Never wakes the machine.
+  let list = [];
+  try {
+    const res = await fetch("/api/sessions", { credentials: "same-origin" }).then((r) => r.json());
+    list = res.sessions || [];
+  } catch (e) {
+    toast("Could not load sessions: " + e);
+  }
+  state.sessions = list.sort(
     (a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0),
   );
   renderSessions();
@@ -231,19 +286,20 @@ async function newSession() {
 }
 
 async function selectSession(id) {
+  closeSidebar();
   state.activeId = id;
   state.messages.clear();
   renderSessions();
-  els.composer.hidden = false;
   els.empty.style.display = "none";
+  updateMode();
   try {
-    const history = await api(`/session/${id}/message`);
-    for (const item of Array.isArray(history) ? history : []) ingestMessage(item);
+    const res = await fetch(`/api/sessions/${id}/messages`, { credentials: "same-origin" }).then((r) => r.json());
+    for (const item of res.messages || []) ingestMessage(item);
   } catch (e) {
     toast(String(e));
   }
   renderThread(true);
-  els.input.focus();
+  if (state.machineOn) els.input.focus();
 }
 
 // --------------------------------------------------------------------------- message store
@@ -427,6 +483,13 @@ function handleEvent(payload) {
   else if (type === "message.removed" && props.messageID) { state.messages.delete(props.messageID); renderThread(); }
   else if (type === "session.updated") syncSession(props.info || props.session);
   else if (type === "session.deleted" || type === "session.removed") removeSession(props.info?.id || props.sessionID);
+  else if (type === "session.idle" && (props.sessionID === state.activeId)) refreshCache(props.sessionID);
+}
+
+// After a response finishes, ask the Worker to re-read this session so D1 has the latest
+// (so it's readable later with the box off). Fire-and-forget.
+function refreshCache(sessionId) {
+  fetch(`/api/sessions/${sessionId}/messages`, { credentials: "same-origin" }).catch(() => {});
 }
 
 function syncSession(s) {
@@ -507,25 +570,13 @@ els.sClear.addEventListener("click", async () => {
 
 els.newSession.addEventListener("click", () => newSession().catch((e) => toast(String(e))));
 
-async function boot() {
-  await Promise.all([loadSessions(), loadAgents()]);
-  connectEvents();
-  if (!state.activeId && state.sessions[0]) await selectSession(state.sessions[0].id);
-}
-
 async function init() {
   setupMarkdown();
   await loadSettings();
-  await pollMachine();
-  setInterval(pollMachine, 15000);
-  const machine = await getMachine();
-  if (machine === "started") {
-    await boot();
-  } else {
-    els.empty.innerHTML = `<h1>opencode phone</h1><p>The machine is ${escapeHtml(machine)}.</p>
-      <button class="btn primary" id="wake">Start machine</button>`;
-    $("#wake").addEventListener("click", () => els.machineToggle.click());
-  }
+  await refreshMachine();          // sets machineOn; connects SSE + agents if the box is up
+  setInterval(refreshMachine, 15000);
+  await loadSessions();            // cache-backed; works with the box off
+  if (!state.activeId && state.sessions[0]) await selectSession(state.sessions[0].id);
 }
 
 // --------------------------------------------------------------------------- utils

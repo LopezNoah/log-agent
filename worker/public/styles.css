@@ -179,6 +179,20 @@ dialog::backdrop { background: rgb(0 0 0 / .5); }
 .caret { display: inline-block; width: 7px; height: 1.05em; background: var(--accent); margin-left: 2px; vertical-align: text-bottom; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* ---------- offline (machine stopped) banner ---------- */
+.offline-banner {
+  max-width: 760px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 14px 18px 30px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.offline-banner .btn { white-space: nowrap; }
+
 /* ---------- composer (centered, lifted off the bottom) ---------- */
 .composer {
   background: linear-gradient(to top, var(--bg) 55%, transparent);
@@ -283,8 +297,33 @@ dialog::backdrop { background: rgb(0 0 0 / .5); }
   box-shadow: 0 10px 40px rgb(0 0 0 / .4);
 }
 
+.menu-toggle {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 40;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text);
+  font-size: 18px;
+  cursor: pointer;
+}
+.scrim { position: fixed; inset: 0; background: rgb(0 0 0 / .5); z-index: 35; }
+
 @media (max-width: 720px) {
   #app { grid-template-columns: 1fr; }
-  #sidebar { position: fixed; inset: 0 30% 0 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; }
-  #sidebar.open { transform: none; }
+  .menu-toggle { display: block; }
+  #thread { padding-top: 64px; }
+  #sidebar {
+    position: fixed; inset: 0 22% 0 0; max-width: 320px; z-index: 38;
+    transform: translateX(-100%); transition: transform .2s ease;
+  }
+  #sidebar.open { transform: none; box-shadow: 0 0 60px rgb(0 0 0 / .6); }
+}
+@media (min-width: 721px) {
+  .scrim { display: none !important; }
 }
