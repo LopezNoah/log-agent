@@ -51,7 +51,10 @@ export class SyncHub extends DurableObject<Env> {
       }
       ws.send(JSON.stringify({ type: "messages", sessionID: sessionId, messages: this.readCachedMessages(sessionId) }));
     } else if (msg?.type === "sync") {
-      this.ensureBridge(); // e.g. client just observed the box come up
+      // Client observed the box come up (or wants a forced refresh): reconcile the cache against
+      // opencode now, then make sure the SSE bridge is running.
+      await this.refreshSessions();
+      this.ensureBridge();
     }
   }
 
@@ -86,13 +89,20 @@ export class SyncHub extends DurableObject<Env> {
     this.bridgeAbort = abort;
     await this.ctx.storage.setAlarm(Date.now() + 30_000);
 
-    // Backfill the session list so the cache is complete even if events were missed.
-    const sessions = await fetchUpstreamJson<any[]>(this.env, "/opencode/session");
-    if (Array.isArray(sessions)) {
-      this.cacheSessions(sessions);
-      this.broadcast({ type: "sessions", sessions });
-    }
+    // Reconcile the cache against opencode so it's an exact mirror, even if events were missed.
+    await this.refreshSessions();
     this.readSSE(abort); // long-lived; not awaited
+  }
+
+  // Pull opencode's authoritative session list and make the cache match it exactly (prune
+  // sessions that no longer exist upstream), then broadcast the corrected list. opencode is the
+  // source of truth; this is what keeps offline browsing accurate instead of showing ghosts.
+  private async refreshSessions(): Promise<void> {
+    if (!(await isMachineStarted(this.env))) return;
+    const sessions = await fetchUpstreamJson<any[]>(this.env, "/opencode/session");
+    if (!Array.isArray(sessions)) return; // fetch failed — keep the existing cache, don't wipe it
+    this.reconcileSessions(sessions);
+    this.broadcast({ type: "sessions", sessions: this.readCachedSessions() });
   }
 
   private maybeStopBridge(): void {
@@ -167,7 +177,16 @@ export class SyncHub extends DurableObject<Env> {
 
   // ---------------------------------------------------------------- SQLite cache
 
-  private cacheSessions(list: any[]): void {
+  // Make the cache exactly match the upstream list: upsert everything present, and delete any
+  // cached session (and its messages) that opencode no longer has.
+  private reconcileSessions(list: any[]): void {
+    const liveIds = new Set<string>(list.map((s) => s?.id).filter(Boolean));
+    for (const row of this.sql("SELECT id FROM sessions").toArray() as { id: string }[]) {
+      if (!liveIds.has(row.id)) {
+        this.sql("DELETE FROM sessions WHERE id = ?", row.id);
+        this.sql("DELETE FROM session_messages WHERE session_id = ?", row.id);
+      }
+    }
     for (const s of list) this.cacheSession(s);
   }
 
