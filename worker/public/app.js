@@ -99,24 +99,27 @@ async function loadDefaultModel() {
 // --------------------------------------------------------------------------- machine
 
 const RUNNING = "started";
-const TRANSITION = new Set(["starting", "stopping"]);     // mid-flight; keep the button busy
-const OFF = new Set(["stopped", "suspended", "created"]);  // any of these means "not running"
+const TRANSITION = new Set(["starting", "stopping"]); // mid-flight states the poll waits out
 const STATE_LABEL = {
   started: "Running", starting: "Starting…", stopping: "Stopping…",
   stopped: "Stopped", suspended: "Stopped", created: "Stopped", unknown: "Unknown",
 };
 
 function renderMachine(stateStr) {
-  const busy = TRANSITION.has(stateStr);
   const running = stateStr === RUNNING;
+  const starting = stateStr === "starting";
+  const stopping = stateStr === "stopping";
   els.machineDot.className = "dot " + stateStr;
   els.machineState.textContent = STATE_LABEL[stateStr] || stateStr;
-  els.machineToggle.disabled = busy;
-  els.machineToggle.textContent = busy ? STATE_LABEL[stateStr] : running ? "Stop machine" : "Start machine";
-  els.machineToggle.dataset.action = running ? "stop" : "start";
-  // Make "Start" a call-to-action (primary) and "Stop" a quieter ghost button.
-  els.machineToggle.classList.toggle("btn-primary", !running && !busy);
-  els.machineToggle.classList.toggle("btn-ghost", running || busy);
+  // Offer "Stop" for a running OR starting machine (so you can cancel a slow start) — only block
+  // clicks while actively stopping. This guarantees the control never locks you out.
+  const showStop = running || starting;
+  els.machineToggle.disabled = stopping;
+  els.machineToggle.textContent = stopping ? "Stopping…" : showStop ? "Stop machine" : "Start machine";
+  els.machineToggle.dataset.action = showStop ? "stop" : "start";
+  // "Start" is the call-to-action (primary); "Stop"/busy are quieter ghost buttons.
+  els.machineToggle.classList.toggle("btn-primary", !showStop && !stopping);
+  els.machineToggle.classList.toggle("btn-ghost", showStop || stopping);
 }
 
 async function refreshMachine(known) {
@@ -161,32 +164,38 @@ function updateMode() {
 
 els.machineToggle.addEventListener("click", () => toggleMachine());
 
+let polling = false;
+
 async function toggleMachine() {
   const action = els.machineToggle.dataset.action || "start";
-  const optimistic = action === "start" ? "starting" : "stopping";
-  renderMachine(optimistic); // immediate feedback: pulsing dot, "Starting…/Stopping…", disabled
+  renderMachine(action === "start" ? "starting" : "stopping"); // instant feedback
   try {
     const res = ensureAuthed(await fetch(`/api/machine/${action}`, { method: "POST", credentials: "same-origin" }));
     if (!res.ok) throw new Error(`Could not ${action} the machine (${res.status})`);
-    // Poll until it actually reaches the target state — start can take ~45s, stop ~10-30s.
-    const reached = action === "start" ? (s) => s === RUNNING : (s) => OFF.has(s);
-    await waitForState(reached, optimistic);
   } catch (e) {
     toast(String(e.message || e));
-    await refreshMachine();
   }
+  // The start request may block server-side until healthy; either way, fast-poll the REAL state
+  // until it settles. refreshMachine() is authoritative — it always wins over optimistic labels.
+  await refreshMachine();
+  pollUntilSettled();
 }
 
-// Poll until target(state) is true. While the machine is mid-transition we keep showing the
-// pulsing optimistic label rather than a stale "Running"/"Stopped" flicker.
-async function waitForState(reached, optimistic) {
-  for (let i = 0; i < 45; i++) {
-    const s = await getMachine();
-    if (reached(s)) return refreshMachine(s);
-    renderMachine(TRANSITION.has(s) ? s : optimistic);
-    await sleep(2000);
+// Fast-poll the authoritative machine state until it stops transitioning, then hand back to the
+// slow background interval. Always renders the real state, so the UI can never get stuck.
+async function pollUntilSettled() {
+  if (polling) return;
+  polling = true;
+  try {
+    for (let i = 0; i < 60; i++) {
+      const s = await getMachine();
+      await refreshMachine(s);
+      if (!TRANSITION.has(s)) return; // settled: started / stopped / suspended / unknown
+      await sleep(2000);
+    }
+  } finally {
+    polling = false;
   }
-  return refreshMachine(); // timed out — show whatever the real state is
 }
 
 // --------------------------------------------------------------------------- sessions
