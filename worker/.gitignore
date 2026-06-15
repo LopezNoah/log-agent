@@ -1,0 +1,12 @@
+# Astro
+.astro/
+dist/
+
+# Cloudflare / Wrangler
+.wrangler/
+
+# Local secrets
+.dev.vars
+
+# Deps
+node_modules/

@@ -37,12 +37,11 @@ function setSessionCookie(c: Context<{ Bindings: Env }>, token: string): void {
 }
 
 export function registerAuthRoutes(app: Hono<{ Bindings: Env }>): void {
-  // Already signed in → skip the login page. Otherwise serve the static login page. The asset
-  // server maps login.html to the extensionless "/login", so fetch that (fetching "/login.html"
-  // would 307-redirect back to "/login" and loop).
-  app.get("/login", async (c) => {
+  // Already signed in → skip the login page. Otherwise fall through to the Astro pipeline, which
+  // renders src/pages/login.astro for this route.
+  app.get("/login", async (c, next) => {
     if (await verifySession(c.env, getCookie(c, COOKIE))) return c.redirect("/");
-    return c.env.ASSETS.fetch(new Request(new URL("/login", c.req.url), { headers: c.req.raw.headers }));
+    return next();
   });
 
   app.post("/login", async (c) => {

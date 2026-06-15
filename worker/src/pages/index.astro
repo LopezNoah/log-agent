@@ -6,10 +6,10 @@
   <title>opencode phone</title>
   <link rel="stylesheet" href="/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/styles.css">
-  <script defer src="/vendor/marked.min.js"></script>
-  <script defer src="/vendor/katex/katex.min.js"></script>
-  <script defer src="/vendor/marked-katex.umd.js"></script>
-  <script defer src="/vendor/purify.min.js"></script>
+  <script is:inline defer src="/vendor/marked.min.js"></script>
+  <script is:inline defer src="/vendor/katex/katex.min.js"></script>
+  <script is:inline defer src="/vendor/marked-katex.umd.js"></script>
+  <script is:inline defer src="/vendor/purify.min.js"></script>
 </head>
 <body class="bg-ink text-zinc-100 antialiased">
   <div id="app" class="grid h-dvh grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)_320px]">
@@ -40,18 +40,32 @@
     <main class="flex flex-col min-w-0 min-h-0 relative">
       <div id="usage-total" class="usage-total" hidden></div>
       <div id="thread" class="flex-1 overflow-y-auto pt-7 pb-2 max-md:pt-16 min-h-0">
-        <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-muted px-6">
-          <h1 class="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
-          <p>A cloud computer for your agents. Pick a session or start a new one.</p>
+        <div id="thread-content" class="min-h-full">
+          <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-muted px-6">
+            <h1 class="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
+            <p>A cloud computer for your agents. Pick a session or start a new one.</p>
+          </div>
         </div>
       </div>
 
+      <button id="jump-bottom" class="jump-bottom" type="button" hidden>↓ Latest</button>
+      <div id="thread-nav" class="thread-nav" hidden aria-label="Jump to prompt"></div>
+
       <div id="offline-banner" class="offline-banner" hidden></div>
 
-      <form id="composer" class="composer" hidden>
+      <form id="composer" class="composer" autocomplete="off" hidden>
         <div class="mx-auto w-full max-w-3xl">
+          <div id="revert-banner" class="revert-banner" hidden></div>
           <div class="composer-bar">
-            <textarea id="input" rows="1" class="w-full bg-transparent outline-none resize-none max-h-56 py-0.5"
+            <div class="composer-tools">
+              <button id="act-undo" class="msg-act" type="button" title="Undo the last turn (revert)">↶ Undo</button>
+              <button id="act-redo" class="msg-act" type="button" title="Redo (unrevert)" hidden>↷ Redo</button>
+              <button id="act-compact" class="msg-act" type="button" title="Compact the conversation (summarize to free context)">⊟ Compact</button>
+              <button id="act-fork" class="msg-act" type="button" title="Fork this session into a new one">⑂ Fork</button>
+            </div>
+            <textarea id="input" name="prompt" rows="1" class="w-full bg-transparent outline-none resize-none max-h-56 py-0.5"
+              autocomplete="off" autocapitalize="sentences" autocorrect="on" spellcheck="true"
+              data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"
               placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
             <div class="flex items-center gap-2 mt-2">
               <select id="agent-select" class="agent-select" title="Agent mode"></select>
@@ -59,6 +73,7 @@
                 <input type="checkbox" id="auto-approve"> ⚡ Auto-approve
               </label>
               <button id="send" class="btn btn-primary ml-auto" type="submit">Send</button>
+              <button id="stop" class="btn btn-stop ml-auto" type="button" hidden title="Stop generating (Esc)">■ Stop</button>
             </div>
           </div>
         </div>
@@ -174,6 +189,6 @@
     </section>
   </div>
 
-  <script src="/assets/app.js" type="module"></script>
+  <script is:inline src="/assets/app.js" type="module"></script>
 </body>
 </html>

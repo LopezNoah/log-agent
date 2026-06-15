@@ -3,14 +3,14 @@
 // it already used to load this page. Live updates arrive over the /opencode/event SSE stream.
 
 import { openSettings } from "./settings.js";
-import { mountArtifact, parseRichText } from "./artifacts.js";
+import { mountArtifact, parseRichText, computeDiff } from "./artifacts.js";
 import { $, els } from "./dom.js";
 import { setupGithubProject } from "./github-project.js";
 import { state } from "./state.js";
 import { api, ensureAuthed, fsApi, getMachine, loadDefaultModel } from "./api.js";
 import { setupMarkdown, renderMarkdown } from "./markdown.js";
 import { closeSidebar, setupMobile } from "./mobile.js";
-import { escapeHtml, sleep, stringify, toast } from "./utils.js";
+import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
 
 // --------------------------------------------------------------------------- machine
 
@@ -255,7 +255,11 @@ async function deleteSelected() {
   if (!rel) return;
   const isDir = state.files.selectedType === "directory";
   const detail = isDir ? " and everything inside it" : "";
-  if (!confirm(`Delete ${rel}${detail}? This can't be undone.`)) return;
+  const ok = await confirmAction(els.fileDelete, {
+    title: `Delete ${isDir ? "folder" : "file"}?`,
+    body: `${rel}${detail} — this can't be undone.`,
+  });
+  if (!ok) return;
   await fsApi(`/fs/path?path=${encodeURIComponent(rel)}`, { method: "DELETE" });
   state.files.selected = "";
   state.files.selectedType = "directory";
@@ -321,6 +325,8 @@ function updateMode() {
       $("#banner-start").addEventListener("click", () => els.machineToggle.click());
     }
   }
+  renderSessionBar();
+  renderComposerState();
 }
 
 els.machineToggle.addEventListener("click", () => toggleMachine());
@@ -392,7 +398,7 @@ function renderSessions() {
     del.className = "session-act danger";
     del.title = "Delete";
     del.textContent = "🗑";
-    del.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s); });
+    del.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s, del); });
     actions.append(rename, del);
 
     row.append(open, actions);
@@ -400,8 +406,12 @@ function renderSessions() {
   }
 }
 
-async function deleteSession(s) {
-  if (!confirm(`Delete "${s.title || "Untitled session"}"? This can't be undone.`)) return;
+async function deleteSession(s, anchor) {
+  const ok = await confirmAction(anchor, {
+    title: "Delete session?",
+    body: `"${s.title || "Untitled session"}" will be permanently removed.`,
+  });
+  if (!ok) return;
   try {
     await api(`/session/${s.id}`, { method: "DELETE" });
     removeSession(s.id); // the DO also broadcasts session.deleted; removeSession is idempotent
@@ -502,7 +512,9 @@ async function newSession() {
 
 // History comes from the DO over the /sync WebSocket: request it, render when it arrives
 // (onSyncMessage → "messages"). Works whether the box is on or off.
-function selectSession(id) {
+// `mode` controls URL history: "push" (a user navigation), "replace" (initial/auto-select), or
+// "none" (we're reacting to a back/forward popstate, so don't touch history).
+function selectSession(id, mode = "push") {
   closeSidebar();
   state.activeId = id;
   state.messages.clear();
@@ -512,7 +524,23 @@ function selectSession(id) {
   renderThread(true);
   syncSend({ type: "open", sessionID: id });
   if (state.machineOn) els.input.focus();
+  if (mode === "push") history.pushState({ session: id }, "", sessionHref(id));
+  else if (mode === "replace") history.replaceState({ session: id }, "", sessionHref(id));
 }
+
+// URL routing: each session lives at /s/<id> (the Worker's SPA fallback serves index.html there,
+// so deep-links and reloads land on the right session).
+function sessionFromUrl() {
+  const m = location.pathname.match(/^\/s\/(.+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function sessionHref(id) {
+  return id ? "/s/" + encodeURIComponent(id) : "/";
+}
+window.addEventListener("popstate", () => {
+  const id = sessionFromUrl();
+  if (id && id !== state.activeId) selectSession(id, "none");
+});
 
 // --------------------------------------------------------------------------- message store
 
@@ -575,24 +603,141 @@ function orderedMessages() {
 }
 
 function renderThread(scroll = false) {
-  const nearBottom = els.thread.scrollHeight - els.thread.scrollTop - els.thread.clientHeight < 120;
-  els.thread.querySelectorAll(".msg").forEach((n) => n.remove());
+  const prevTop = els.thread.scrollTop;
+  els.threadContent.querySelectorAll(".msg").forEach((n) => n.remove());
   mountQueue = []; // artifact placeholders to hydrate after innerHTML is in place
 
   renderPinned();
 
+  const revertBoundary = revertBoundaryCreated();
   for (const m of orderedMessages()) {
     const node = document.createElement("div");
     node.className = "msg " + (m.info.role || "assistant");
+    node.dataset.mid = m.info.id;
+    const local = m.info.id?.startsWith("local-");
+    if (revertBoundary && !local && (m.info.time?.created || 0) >= revertBoundary) node.classList.add("reverted");
     const body = m.info.role === "user" ? renderUser(m) : renderAssistant(m);
-    node.innerHTML = `<div class="role">${escapeHtml(m.info.role || "assistant")}</div>${body}`;
-    els.thread.appendChild(node);
+    node.innerHTML = `<div class="role">${escapeHtml(m.info.role || "assistant")}</div>${body}${renderMsgActions(m)}`;
+    els.threadContent.appendChild(node);
   }
 
   drainArtifacts();
   renderUsageTotal();
-  if (scroll || nearBottom) els.thread.scrollTop = els.thread.scrollHeight;
+  renderThreadNav();
+
+  // Auto-scroll itself is owned by the ResizeObserver (it fires on content-height changes, never
+  // per token). Here we only handle the two cases the observer can't: (a) an explicit request
+  // (open/select/send) snaps to bottom and re-arms following; (b) when NOT following, restore the
+  // pre-rebuild scrollTop so tearing down + rebuilding .msg nodes never nudges your reading spot.
+  if (scroll) { following = true; els.thread.scrollTop = els.thread.scrollHeight; }
+  else if (!following) els.thread.scrollTop = prevTop;
+  updateScrollAffordances();
 }
+
+// --------------------------------------------------------------------------- scroll follow + prompt nav
+
+// Scroll state lives in plain module variables — independent of the render cycle — so the
+// auto-scroll decision never jitters with re-render timing (perf tip #2, vanilla equivalent).
+//   following — pinned to the bottom; auto-scroll is allowed
+//   touching  — a finger is on the thread (mobile): pause auto-scroll until release
+let following = true;
+let touching = false;
+let scrollRaf = 0;
+const AT_BOTTOM_PX = 24; // distance from the bottom that still counts as "at the bottom"
+
+function atBottom() {
+  return els.thread.scrollHeight - els.thread.scrollTop - els.thread.clientHeight <= AT_BOTTOM_PX;
+}
+
+// The ONLY code that programmatically scrolls. Driven by a ResizeObserver on the thread content,
+// so it runs when the content's height actually changes (a new line, a tool result) — not on
+// every token (perf tip #1).
+function maybeAutoScroll() {
+  if (following && !touching) els.thread.scrollTop = els.thread.scrollHeight;
+  updateScrollAffordances();
+}
+
+new ResizeObserver(() => maybeAutoScroll()).observe(els.threadContent);
+
+// Mobile: a finger on the thread pauses auto-scroll outright; releasing resumes it only if the
+// user is still at the bottom (the scroll handler keeps `following` accurate during the drag).
+els.thread.addEventListener("touchstart", () => { touching = true; }, { passive: true });
+els.thread.addEventListener("touchend", () => { touching = false; }, { passive: true });
+els.thread.addEventListener("touchcancel", () => { touching = false; }, { passive: true });
+
+function renderThreadNav() {
+  const users = orderedMessages().filter((m) => m.info.role === "user" && !m.info.id?.startsWith("local-"));
+  if (users.length < 2) { els.threadNav.hidden = true; els.threadNav.innerHTML = ""; return; }
+  els.threadNav.hidden = false;
+  els.threadNav.innerHTML = users
+    .map((m, i) => `<button type="button" class="thread-nav-dot" data-mid="${escapeHtml(m.info.id)}" aria-label="Prompt ${i + 1}" title="${escapeHtml(promptPreview(m))}"></button>`)
+    .join("");
+  updateActiveDot();
+}
+
+function promptPreview(m) {
+  const text = m.order.map((id) => m.parts.get(id)).filter((p) => p?.type === "text").map((p) => p.text).join(" ").trim();
+  return text.length > 60 ? text.slice(0, 60) + "…" : text || "Prompt";
+}
+
+function msgNode(mid) {
+  return mid ? els.threadContent.querySelector(`.msg[data-mid="${mid}"]`) : null;
+}
+
+function updateScrollAffordances() {
+  // Show "↓ Latest" only when we're not following AND there's actually content below the fold.
+  els.jumpBottom.hidden = following || atBottom();
+  updateActiveDot();
+}
+
+// Anchor a just-sent prompt near the top so the response streams in below it (manifesto #4 /
+// ChatGPT): the start stays put and we don't pin to the bottom. Scroll down yourself to follow.
+function anchorTop(mid) {
+  following = false;
+  const node = msgNode(mid);
+  if (node) node.scrollIntoView({ block: "start", behavior: "auto" });
+  updateScrollAffordances();
+}
+
+// Highlight the dot for the prompt whose section is currently at/above the top of the viewport.
+function updateActiveDot() {
+  if (els.threadNav.hidden) return;
+  const dots = els.threadNav.querySelectorAll(".thread-nav-dot");
+  if (!dots.length) return;
+  const threadTop = els.thread.getBoundingClientRect().top;
+  let activeMid = dots[0].dataset.mid;
+  for (const dot of dots) {
+    const node = msgNode(dot.dataset.mid);
+    if (node && node.getBoundingClientRect().top - threadTop <= 64) activeMid = dot.dataset.mid;
+  }
+  dots.forEach((d) => d.toggleAttribute("data-active", d.dataset.mid === activeMid));
+}
+
+// A manual scroll up disables following; scrolling back to the bottom re-enables it (manifesto
+// #1/#2). Our own auto-scroll lands at the bottom → atBottom() true → following stays on.
+els.thread.addEventListener("scroll", () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    following = atBottom();
+    updateScrollAffordances();
+  });
+});
+
+els.jumpBottom.addEventListener("click", () => {
+  following = true;
+  els.jumpBottom.hidden = true;
+  els.thread.scrollTo({ top: els.thread.scrollHeight, behavior: "smooth" });
+});
+
+els.threadNav.addEventListener("click", (e) => {
+  const dot = e.target.closest(".thread-nav-dot");
+  if (!dot) return;
+  const node = msgNode(dot.dataset.mid);
+  if (!node) return;
+  following = false;
+  node.scrollIntoView({ behavior: "smooth", block: "start" });
+});
 
 function renderUser(m) {
   const text = m.order.map((id) => m.parts.get(id)).filter((p) => p?.type === "text").map((p) => p.text).join("");
@@ -725,7 +870,7 @@ function renderPinned() {
     sec.appendChild(slot);
     mountQueue.push({ domId, spec });
   }
-  els.thread.appendChild(sec);
+  els.threadContent.appendChild(sec);
 }
 
 function fmtTokens(n) {
@@ -771,19 +916,85 @@ function renderUsageTotal() {
   el.textContent = `Σ ↑ ${fmtTokens(input)} ↓ ${fmtTokens(output)}` + (cost > 0 ? ` · ${fmtCost(cost)}` : "");
 }
 
+// A readable one-line label for a tool call from its input (opencode usually sets state.title,
+// but this is a sensible fallback and drives the bash "$ command" line).
+function toolLabel(tool, input) {
+  if (!input || typeof input !== "object") return "";
+  if (tool === "bash") return String(input.command || input.description || "");
+  if (tool === "read" || tool === "edit" || tool === "write") return String(input.filePath || input.path || "");
+  if (tool === "grep") return String(input.pattern || "");
+  if (tool === "glob" || tool === "list") return String(input.pattern || input.path || "");
+  if (tool === "webfetch") return String(input.url || "");
+  return "";
+}
+
+// before/after content for tools that change a file, so they can render in the diff component.
+function fileEdit(tool, input) {
+  if (!input || typeof input !== "object") return null;
+  const filename = input.filePath || input.path || input.file || "";
+  if (tool === "write") {
+    const after = String(input.content ?? "");
+    return after ? { filename, before: "", after } : null;
+  }
+  if (tool === "edit") {
+    const before = String(input.oldString ?? input.old_string ?? "");
+    const after = String(input.newString ?? input.new_string ?? "");
+    return before || after ? { filename, before, after } : null; // else fall back to generic rendering
+  }
+  return null;
+}
+
+// Build an inline diff as escaped HTML (reuses the .diff* classes from the diff widget) + a
+// +adds/-dels stat. Memoized per part so the per-token thread rebuild doesn't re-run the LCS.
+const diffCache = new Map();
+function diffHtml(partId, before, after) {
+  const key = `${partId}:${before.length}:${after.length}`;
+  const hit = diffCache.get(key);
+  if (hit) return hit;
+  let adds = 0, dels = 0, rows = "";
+  for (const op of computeDiff(before, after)) {
+    const sign = op.t === "add" ? "+" : op.t === "del" ? "-" : " ";
+    if (op.t === "add") adds++; else if (op.t === "del") dels++;
+    const text = (op.t === "add" ? op.b : op.a) ?? "";
+    rows += `<div class="diff-line ${op.t}"><span class="diff-gutter">${sign}</span><span class="diff-text">${escapeHtml(text)}</span></div>`;
+  }
+  const result = { html: `<pre class="diff">${rows}</pre>`, adds, dels };
+  diffCache.set(key, result);
+  if (diffCache.size > 200) diffCache.delete(diffCache.keys().next().value);
+  return result;
+}
+
 function renderTool(p) {
   const st = p.state || {};
-  const name = st.title || p.tool || p.name || "tool";
+  const tool = p.tool || p.name || "tool";
   const status = st.status || p.status || "pending";
-  const input = st.input ?? p.input;
+  const input = st.input ?? p.input ?? {};
   const output = st.output ?? p.output ?? st.error ?? p.error;
-  const body = [
-    input != null ? "› " + stringify(input) : "",
-    output != null ? stringify(output) : "",
-  ].filter(Boolean).join("\n\n");
+  const label = st.title || toolLabel(tool, input);
+
+  // File changes render as a compact diff: collapsed by default with a +adds/-dels stat in the
+  // header (useful at a glance), the diff itself one click away.
+  const fe = (tool === "edit" || tool === "write") ? fileEdit(tool, input) : null;
+  if (fe) {
+    const { html, adds, dels } = diffHtml(p.id || p.callID || tool, fe.before, fe.after);
+    const stat = `<span class="diff-stat"><span class="add">+${adds}</span> <span class="del">-${dels}</span></span>`;
+    return `<details class="tool tool-diff"${status === "error" ? " open" : ""}>
+      <summary><span class="tname">${escapeHtml(tool)}</span><span class="tlabel">${escapeHtml(fe.filename || label)}</span>${stat}<span class="tstate ${escapeHtml(status)}">${escapeHtml(status)}</span></summary>
+      <div class="tool-diff-body">${html}</div>
+    </details>`;
+  }
+
+  const cmd = tool === "bash" && input && typeof input === "object" ? String(input.command || "") : "";
+  let body = "";
+  if (cmd) body += `<div class="tool-cmd"><span class="tool-cmd-prompt">$</span> ${escapeHtml(cmd)}</div>`;
+  else if (input && typeof input === "object" && Object.keys(input).length) body += `<pre class="tool-input">${escapeHtml(stringify(input))}</pre>`;
+  if (output != null && String(output) !== "") body += `<pre>${escapeHtml(stringify(output))}</pre>`;
+
+  // Collapsed by default (only errors auto-expand); the command/label in the summary tells you what
+  // ran, and the output is one click away.
   return `<details class="tool"${status === "error" ? " open" : ""}>
-    <summary><span class="tname">${escapeHtml(name)}</span><span class="tstate ${escapeHtml(status)}">${escapeHtml(status)}</span></summary>
-    ${body ? `<pre>${escapeHtml(body)}</pre>` : ""}
+    <summary><span class="tname">${escapeHtml(tool)}</span>${label ? `<span class="tlabel">${escapeHtml(label)}</span>` : ""}<span class="tstate ${escapeHtml(status)}">${escapeHtml(status)}</span></summary>
+    ${body ? `<div class="tool-body">${body}</div>` : ""}
   </details>`;
 }
 
@@ -797,13 +1008,23 @@ function textFallback(m) {
 els.composer.addEventListener("submit", (e) => { e.preventDefault(); send(); });
 els.input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  else if (e.key === "Escape" && isBusy()) { e.preventDefault(); stopActive(); }
 });
 els.input.addEventListener("input", () => {
   els.input.style.height = "auto";
   els.input.style.height = Math.min(els.input.scrollHeight, 220) + "px";
 });
 
+// Safari/iOS offers saved-password AutoFill on the first focus of any text field on a domain that
+// has stored credentials (our /login page) — it ignores autocomplete="off" for this. Keeping the
+// field readonly except while focused makes Safari skip the AutoFill prompt without affecting
+// typing: the field is readonly at the instant focus is evaluated, then editable immediately after.
+els.input.setAttribute("readonly", "");
+els.input.addEventListener("focus", () => els.input.removeAttribute("readonly"));
+els.input.addEventListener("blur", () => els.input.setAttribute("readonly", ""));
+
 function send() {
+  if (isBusy()) return; // generating — interrupt with Stop (Esc) first
   const text = els.input.value.trim();
   if (!text) return;
   els.input.value = "";
@@ -822,7 +1043,9 @@ async function sendText(text) {
     parts: new Map([["t", { type: "text", text }]]),
     order: ["t"],
   });
-  renderThread(true);
+  setBusy(state.activeId, true); // optimistic; session.idle/error will clear it
+  renderThread();
+  anchorTop(localId); // pin the prompt to the top; the reply streams in below (no bottom-jump)
 
   const payload = { parts: [{ type: "text", text }] };
   if (state.agent) payload.agent = state.agent;
@@ -831,15 +1054,219 @@ async function sendText(text) {
     payload.model = { providerID: state.model.slice(0, i), modelID: state.model.slice(i + 1) };
   }
   try {
+    // No client timeout: a generation can legitimately run for minutes. The reply renders from the
+    // SSE stream regardless, so even if this POST is slow we don't want to abort it.
     await api(`/session/${state.activeId}/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      timeout: 0,
     });
   } catch (e) {
     toast("Send failed: " + e);
   }
 }
+
+// --------------------------------------------------------------------------- session & message actions
+
+// All of these hit opencode directly through the same-origin /opencode proxy (api()). They only
+// make sense while the box is up, which is also the only time the composer + toolbar are shown.
+function post(path, body, extra) {
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}), ...extra });
+}
+
+function activeSession() {
+  return state.sessions.find((s) => s.id === state.activeId) || null;
+}
+
+// providerID/modelID for summarize: prefer the user's selected model, else the session's own model.
+function currentModel() {
+  if (state.model && state.model.includes("/")) {
+    const i = state.model.indexOf("/");
+    return { providerID: state.model.slice(0, i), modelID: state.model.slice(i + 1) };
+  }
+  const s = activeSession();
+  if (s?.model?.providerID && s?.model?.id) return { providerID: s.model.providerID, modelID: s.model.id };
+  return null;
+}
+
+function messageText(m) {
+  return m.order
+    .map((id) => m.parts.get(id))
+    .filter((p) => p?.type === "text" || p?.type === "reasoning")
+    .map((p) => p.text)
+    .join("");
+}
+
+// --- busy state (drives Stop vs Send) ---
+
+function isBusy(id = state.activeId) {
+  return !!id && state.busy.has(id);
+}
+
+function setBusy(id, on) {
+  if (!id) return;
+  const changed = on ? !state.busy.has(id) : state.busy.has(id);
+  if (on) state.busy.add(id); else state.busy.delete(id);
+  if (changed && id === state.activeId) renderComposerState();
+}
+
+function renderComposerState() {
+  const busy = isBusy();
+  if (els.send) els.send.hidden = busy;
+  if (els.stop) els.stop.hidden = !busy;
+}
+
+// Self-heal busy on a fresh thread load: a session is generating iff its newest assistant message
+// hasn't completed. (Don't call this on every part update — between send and the first assistant
+// message there's no assistant yet, and it would wrongly clear the optimistic busy flag.)
+function reconcileBusy(sessionID) {
+  if (!sessionID) return;
+  const assistants = [...state.messages.values()]
+    .filter((m) => m.info.sessionID === sessionID && m.info.role === "assistant")
+    .sort((a, b) => (a.info.time?.created || 0) - (b.info.time?.created || 0));
+  const last = assistants[assistants.length - 1];
+  setBusy(sessionID, !!last && !last.info.time?.completed && !last.info.error);
+}
+
+// --- session toolbar + revert banner ---
+
+function revertBoundaryCreated() {
+  const s = activeSession();
+  if (!s?.revert?.messageID) return 0;
+  return state.messages.get(s.revert.messageID)?.info.time?.created || 0;
+}
+
+// The session tools live inside the composer (shown only when the box is up + a session is open),
+// so this only toggles the revert-only affordances: the Redo button and the reverted banner.
+function renderSessionBar() {
+  const reverted = state.machineOn && !!state.activeId && !!activeSession()?.revert;
+  els.actRedo.hidden = !reverted;
+  els.revertBanner.hidden = !reverted;
+  if (reverted) {
+    els.revertBanner.innerHTML =
+      `<span>↩ Reverted — later messages are hidden. Send a message to keep this point, or redo.</span>
+       <button class="btn btn-ghost" id="revert-redo" type="button">↷ Redo</button>`;
+    $("#revert-redo")?.addEventListener("click", () => unrevertSession());
+  }
+}
+
+// --- actions ---
+
+async function stopActive() {
+  if (!state.activeId) return;
+  try { await post(`/session/${state.activeId}/abort`); }
+  catch (e) { toast("Stop failed: " + e); }
+  setBusy(state.activeId, false); // optimistic; session.idle confirms
+}
+
+async function undoLast() {
+  if (!state.activeId) return;
+  const lastUser = orderedMessages()
+    .filter((m) => m.info.role === "user" && !m.info.id?.startsWith("local-"))
+    .pop();
+  if (!lastUser) { toast("Nothing to undo."); return; }
+  await revertToMessage(lastUser.info.id, "Undid last turn — use Redo to restore.");
+}
+
+async function unrevertSession() {
+  if (!state.activeId) return;
+  try { await post(`/session/${state.activeId}/unrevert`); }
+  catch (e) { toast("Redo failed: " + e); }
+}
+
+async function revertToMessage(messageID, okMsg) {
+  if (!state.activeId || !messageID) return;
+  try { await post(`/session/${state.activeId}/revert`, { messageID }); if (okMsg) toast(okMsg); }
+  catch (e) { toast("Revert failed: " + e); }
+}
+
+// Edit = revert to that message (undoing it + everything after), then prefill the composer with its
+// text so the user can tweak and resend. Sending from a reverted point commits the revert.
+async function editMessage(messageID) {
+  const m = state.messages.get(messageID);
+  const text = m ? messageText(m) : "";
+  await revertToMessage(messageID);
+  els.input.value = text;
+  els.input.style.height = "auto";
+  els.input.style.height = Math.min(els.input.scrollHeight, 220) + "px";
+  els.input.focus();
+}
+
+async function forkSession(messageID) {
+  if (!state.activeId) return;
+  try {
+    const s = await post(`/session/${state.activeId}/fork`, messageID ? { messageID } : {});
+    if (s?.id) {
+      syncSession(s);
+      syncSend({ type: "sync" }); // let the DO mirror the new session into its cache too
+      selectSession(s.id);
+      toast("Forked into a new session");
+    }
+  } catch (e) {
+    toast("Fork failed: " + e);
+  }
+}
+
+async function compactSession() {
+  if (!state.activeId) return;
+  const model = currentModel();
+  if (!model) { toast("Pick a model in Settings first."); return; }
+  try { await post(`/session/${state.activeId}/summarize`, model, { timeout: 0 }); toast("Compacting conversation…"); }
+  catch (e) { toast("Compact failed: " + e); }
+}
+
+async function deleteMessage(messageID, anchor) {
+  if (!state.activeId || !messageID) return;
+  const ok = await confirmAction(anchor, { title: "Delete message?", body: "It will be removed from the conversation." });
+  if (!ok) return;
+  try { await api(`/session/${state.activeId}/message/${messageID}`, { method: "DELETE" }); }
+  catch (e) { toast("Delete failed: " + e); }
+}
+
+function copyMessage(messageID) {
+  const m = state.messages.get(messageID);
+  if (!m) return;
+  const text = messageText(m);
+  if (!navigator.clipboard) { toast("Clipboard unavailable"); return; }
+  navigator.clipboard.writeText(text).then(() => toast("Copied"), () => toast("Copy failed"));
+}
+
+// Per-message hover actions. Skipped for the optimistic local bubble and while the box is off.
+function renderMsgActions(m) {
+  if (!state.machineOn || m.info.id?.startsWith("local-")) return "";
+  const id = escapeHtml(m.info.id);
+  const btn = (act, label, title, cls = "") =>
+    `<button class="msg-act ${cls}" type="button" data-act="${act}" data-id="${id}" title="${escapeHtml(title)}">${label}</button>`;
+  const acts = [];
+  if (m.info.role === "user") acts.push(btn("edit", "✎", "Edit & resend"));
+  acts.push(btn("revert", "↶", "Revert to before this message"));
+  acts.push(btn("fork", "⑂", "Fork a new session here"));
+  acts.push(btn("copy", "⧉", "Copy text"));
+  acts.push(btn("delete", "🗑", "Delete message", "danger"));
+  return `<div class="msg-actions">${acts.join("")}</div>`;
+}
+
+// One delegated handler for every message's action buttons — survives the per-render rebuild of
+// .msg nodes (the #thread element itself is never replaced).
+els.thread.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn || !els.thread.contains(btn)) return;
+  const id = btn.dataset.id;
+  switch (btn.dataset.act) {
+    case "edit": editMessage(id); break;
+    case "revert": revertToMessage(id, "Reverted — use Redo to restore."); break;
+    case "fork": forkSession(id); break;
+    case "copy": copyMessage(id); break;
+    case "delete": deleteMessage(id, btn); break;
+  }
+});
+
+els.stop.addEventListener("click", () => stopActive());
+els.actUndo.addEventListener("click", () => undoLast());
+els.actRedo.addEventListener("click", () => unrevertSession());
+els.actCompact.addEventListener("click", () => compactSession());
+els.actFork.addEventListener("click", () => forkSession());
 
 // --------------------------------------------------------------------------- sync (WebSocket to the SyncHub DO)
 
@@ -849,6 +1276,14 @@ function connectSync() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/sync`);
   state.ws = ws;
+  // Only act on intent once the socket is actually OPEN. On a fresh page load init() fires before
+  // the handshake finishes, so a sync/open sent eagerly would be silently dropped (syncSend gates
+  // on readyState) and the rail/thread would stay on the stale cached snapshot. Doing it here also
+  // makes every reconnect reload the open thread.
+  ws.onopen = () => {
+    syncSend({ type: "sync" });
+    if (state.activeId) syncSend({ type: "open", sessionID: state.activeId });
+  };
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
@@ -868,12 +1303,18 @@ function syncSend(obj) {
 function onSyncMessage(msg) {
   if (msg.type === "snapshot" || msg.type === "sessions") {
     setSessions(msg.sessions || []);
-    if (!state.activeId && state.sessions[0]) selectSession(state.sessions[0].id);
+    if (!state.activeId) {
+      // Honor a /s/<id> deep-link if present; otherwise open the most recent session.
+      const target = sessionFromUrl() || state.sessions[0]?.id;
+      if (target) selectSession(target, "replace");
+    }
   } else if (msg.type === "messages") {
     if (msg.sessionID === state.activeId) {
       state.messages.clear();
       for (const item of msg.messages || []) ingestMessage(item);
+      reconcileBusy(msg.sessionID); // self-heal Stop/Send if we loaded mid-run
       renderThread(true);
+      renderSessionBar();
     }
   } else if (msg.type === "event") {
     handleEvent(msg.event);
@@ -885,6 +1326,7 @@ function setSessions(list) {
     (a, b) => (b.time?.updated || b.time?.created || 0) - (a.time?.updated || a.time?.created || 0),
   );
   renderSessions();
+  renderSessionBar(); // the active session's title/revert state may have changed
 }
 
 function handleEvent(payload) {
@@ -893,8 +1335,22 @@ function handleEvent(payload) {
   if (type === "message.updated") onMessageUpdated(props.info || props.message);
   else if (type === "message.part.updated") onPartUpdated(props.part);
   else if (type === "message.removed" && props.messageID) { state.messages.delete(props.messageID); renderThread(); }
-  else if (type === "session.updated" || type === "session.created") syncSession(props.info || props.session);
+  else if (type === "session.updated" || type === "session.created") { syncSession(props.info || props.session); renderSessionBar(); }
   else if (type === "session.deleted" || type === "session.removed") removeSession(props.info?.id || props.sessionID);
+  else if (type === "session.idle") setBusy(props.sessionID, false);
+  else if (type === "session.error") { setBusy(props.sessionID, false); toast("Session error" + sessionErrorText(props)); }
+  else if (type === "session.compacted" && props.sessionID === state.activeId) {
+    toast("Conversation compacted");
+    // Compaction rewrites history wholesale, so the incrementally-built thread can be stale —
+    // re-open to pull the authoritative message list from the box.
+    syncSend({ type: "open", sessionID: state.activeId });
+  }
+}
+
+function sessionErrorText(props) {
+  const err = props?.error;
+  const msg = err?.data?.message || err?.message || err?.name;
+  return msg ? ": " + msg : "";
 }
 
 function syncSession(s) {
@@ -906,7 +1362,13 @@ function syncSession(s) {
 
 function removeSession(id) {
   state.sessions = state.sessions.filter((x) => x.id !== id);
-  if (state.activeId === id) { state.activeId = null; els.composer.hidden = true; els.empty.style.display = ""; }
+  if (state.activeId === id) {
+    state.activeId = null;
+    els.composer.hidden = true;
+    els.empty.style.display = "";
+    history.replaceState({}, "", "/"); // drop /s/<id> now that nothing is open
+    renderSessionBar();
+  }
   renderSessions();
 }
 

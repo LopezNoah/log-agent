@@ -3,14 +3,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:app && npm run build:css",
-    "build:app": "vite build",
+    "build": "npm run build:client && npm run build:css && npm run build:astro",
+    "build:client": "vite build -c vite.client.config.js",
     "build:css": "tailwindcss -i src/styles/input.css -o public/styles.css --minify",
-    "dev": "npm run build && wrangler dev",
-    "deploy": "npm run build && wrangler deploy",
+    "build:astro": "astro build",
+    "dev": "astro dev",
+    "preview": "npm run build && wrangler dev -c dist/server/wrangler.json",
+    "deploy": "npm run build && wrangler deploy -c dist/server/wrangler.json",
     "db:migrate:local": "wrangler d1 migrations apply opencode_phone --local",
     "db:migrate": "wrangler d1 migrations apply opencode_phone --remote",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "astro check"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
@@ -20,6 +22,8 @@
     "wrangler": "^4.100.0"
   },
   "dependencies": {
+    "@astrojs/cloudflare": "^13.7.0",
+    "astro": "^6.4.7",
     "hono": "^4.12.25"
   }
 }

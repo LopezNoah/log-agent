@@ -1,12 +1,13 @@
 name = "opencode-phone-control"
-main = "src/index.ts"
+main = "src/worker.ts"
 compatibility_date = "2026-06-14"
+compatibility_flags = ["nodejs_compat"]
 
+# Astro builds the client/static output into ./dist/client; the @astrojs/cloudflare adapter wires
+# the ASSETS binding to it and emits the deploy-time config at ./dist/server/wrangler.json.
 [assets]
-directory = "./public"
+directory = "./dist/client"
 binding = "ASSETS"
-run_worker_first = true
-not_found_handling = "single-page-application"
 
 # FLY_MACHINE_ID is intentionally unset — the Worker resolves the machine by listing
 # FLY_APP_NAME's machines, so recreating the box (e.g. a region change) never breaks it.

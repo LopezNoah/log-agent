@@ -306,7 +306,7 @@ function replaceTreeNode(root, node) {
 
 const DIFF_CELL_LIMIT = 400_000; // n*m guard so big files don't hang the LCS
 
-function computeDiff(a, b) {
+export function computeDiff(a, b) {
   const A = a.split("\n");
   const B = b.split("\n");
   if (A.length * B.length > DIFF_CELL_LIMIT) {

@@ -3,6 +3,8 @@
 // the other sections are scaffolded placeholders for now. Self-contained module: it owns
 // its own fetch + toast and tells the rest of the app when connectors change via an event.
 
+import { confirmAction } from "./utils.js";
+
 const overlay = document.getElementById("settings-overlay");
 const content = document.getElementById("settings-content");
 const nav = document.getElementById("settings-nav");
@@ -215,18 +217,19 @@ function renderLlm() {
 
   content.querySelectorAll(".connector-row[data-id]").forEach((row) => {
     const id = row.dataset.id;
-    row.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => llmAction(b.dataset.act, id)));
+    row.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => llmAction(b.dataset.act, id, b)));
   });
 }
 
-async function llmAction(act, id) {
+async function llmAction(act, id, anchor) {
   const c = connectors.find((x) => x.id === id);
   if (!c) return;
   if (act === "default") {
     await request(`/api/connectors/${id}/default`, { method: "POST" });
     await reload(); announceChange(); render();
   } else if (act === "delete") {
-    if (!confirm(`Remove the ${LLM_PROVIDERS[c.provider]?.name || c.provider} key?`)) return;
+    const name = LLM_PROVIDERS[c.provider]?.name || c.provider;
+    if (!(await confirmAction(anchor, { title: "Remove key?", body: `The ${name} API key will be deleted.`, confirmLabel: "Remove" }))) return;
     await request(`/api/connectors/${id}`, { method: "DELETE" });
     await reload(); announceChange(); render();
     toast("Removed");
@@ -295,7 +298,7 @@ function renderGithub() {
     } catch (err) { toast("Save failed: " + err.message); }
   });
 
-  content.querySelector("#gh-remove")?.addEventListener("click", () => removeConnector(c, "GitHub"));
+  content.querySelector("#gh-remove")?.addEventListener("click", (e) => removeConnector(c, "GitHub", e.currentTarget));
   content.querySelector("#gh-sync")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
@@ -356,7 +359,7 @@ function renderFly() {
     } catch (err) { toast("Save failed: " + err.message); }
   });
 
-  content.querySelector("#fly-remove")?.addEventListener("click", () => removeConnector(c, "Fly.io"));
+  content.querySelector("#fly-remove")?.addEventListener("click", (e) => removeConnector(c, "Fly.io", e.currentTarget));
 }
 
 // ---------------------------------------------------------------- Notifications
@@ -408,7 +411,7 @@ function renderNotifications() {
 
   content.querySelectorAll(".connector-row[data-id]").forEach((row) => {
     const id = row.dataset.id;
-    row.querySelector('[data-act="delete"]').addEventListener("click", () => removeConnector(connectors.find((x) => x.id === id), "sink"));
+    row.querySelector('[data-act="delete"]').addEventListener("click", (e) => removeConnector(connectors.find((x) => x.id === id), "sink", e.currentTarget));
     row.querySelector('[data-act="test"]').addEventListener("click", async (e) => {
       e.target.disabled = true;
       try {
@@ -420,9 +423,9 @@ function renderNotifications() {
   });
 }
 
-async function removeConnector(c, label) {
+async function removeConnector(c, label, anchor) {
   if (!c) return;
-  if (!confirm(`Remove this ${label}?`)) return;
+  if (!(await confirmAction(anchor, { title: `Remove ${label}?`, body: "This disconnects it from your account.", confirmLabel: "Remove" }))) return;
   try {
     await request(`/api/connectors/${c.id}`, { method: "DELETE" });
     await reload(); announceChange(); render();

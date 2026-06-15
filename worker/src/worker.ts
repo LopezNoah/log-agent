@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import astroHandler from "@astrojs/cloudflare/entrypoints/server";
 import type { Env } from "./env";
 import {
   ensureFlyMachineStarted,
@@ -130,9 +131,14 @@ app.delete("/api/system-prompt", async (c) => {
   return c.json({ ok: true });
 });
 
-// Unmatched API routes are 404 JSON; everything else is the static SPA.
+// Unmatched API routes are 404 JSON.
 app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
-app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+
+// Everything else flows into Astro via the adapter's default server handler: it matches static
+// assets (the client bundle, CSS, vendor), falls back to the ASSETS binding, then renders the
+// matched page (index.astro / login.astro) through app.render(). Auth already ran above via
+// requireSession, so only authenticated requests (or the public /login page) reach a render.
+app.all("*", (c) => astroHandler.fetch(c.req.raw, c.env, c.executionCtx));
 
 // ---------------------------------------------------------------------------
 // Worker entry: Hono fetch + scheduled idle-stop; export the DO

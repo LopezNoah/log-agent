@@ -2,12 +2,18 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { fetchUpstreamJson, isMachineStarted, upstreamHeaders } from "./fly";
 
+// How often, at most, to persist the idle-stop activity clock. The reconcile cron compares it
+// against IDLE_STOP_SECONDS (default 3600s), so coarse granularity is plenty — writing per token
+// would stall the live event relay behind a cross-service D1 write.
+const ACTIVITY_WRITE_INTERVAL_MS = 15_000;
+
 // One instance (getByName("hub")) — the single coordination atom for this single-user tool.
 // It owns the session/message cache (SQLite), fans out to every connected client over
 // WebSocket, and mirrors opencode's SSE event stream while the Fly box is running.
 export class SyncHub extends DurableObject<Env> {
   private bridgeActive = false;
   private bridgeAbort: AbortController | null = null;
+  private lastActivityWrite = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -36,6 +42,12 @@ export class SyncHub extends DurableObject<Env> {
     this.ctx.acceptWebSocket(pair[1]);
     pair[1].send(JSON.stringify({ type: "snapshot", sessions: this.readCachedSessions() }));
     this.ensureBridge();
+    // The cached snapshot above renders instantly but can be stale. Force a reconcile for THIS
+    // connection regardless of bridge state — ensureBridge() short-circuits when the bridge is
+    // already running (a prior tab), so without this a freshly opened tab/browser would keep
+    // showing the stale list until the next upstream event. refreshSessions() no-ops when the box
+    // is off, so offline browsing still shows the cache.
+    this.ctx.waitUntil(this.refreshSessions().catch(() => {}));
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -45,11 +57,11 @@ export class SyncHub extends DurableObject<Env> {
 
     if (msg?.type === "open" && msg.sessionID) {
       const sessionId = String(msg.sessionID);
-      if (await isMachineStarted(this.env)) {
-        const live = await fetchUpstreamJson<any[]>(this.env, `/opencode/session/${encodeURIComponent(sessionId)}/message`);
-        if (Array.isArray(live)) this.cacheMessages(sessionId, live);
-      }
+      // Cache-first: answer instantly from the durable cache so the thread loads even when the box
+      // is off, slow, or 524ing — never block the client on a live fetch. Then reconcile against
+      // opencode in the background and re-broadcast only if it actually changed.
       ws.send(JSON.stringify({ type: "messages", sessionID: sessionId, messages: this.readCachedMessages(sessionId) }));
+      this.ctx.waitUntil(this.refreshMessages(sessionId));
     } else if (msg?.type === "sync") {
       // Client observed the box come up (or wants a forced refresh): reconcile the cache against
       // opencode now, then make sure the SSE bridge is running.
@@ -105,6 +117,20 @@ export class SyncHub extends DurableObject<Env> {
     this.broadcast({ type: "sessions", sessions: this.readCachedSessions() });
   }
 
+  // Reconcile one session's messages against opencode and, only if they changed, update the cache
+  // and push the fresh copy to clients. Best-effort + time-boxed (fetchUpstreamJson aborts), and
+  // run via waitUntil — so a slow/unreachable box never stalls anything; the cache-first send in
+  // the open handler already happened. The change check also avoids the expensive full re-cache
+  // (DELETE + re-INSERT) of a large session when nothing is new.
+  private async refreshMessages(sessionId: string): Promise<void> {
+    if (!(await isMachineStarted(this.env))) return;
+    const live = await fetchUpstreamJson<any[]>(this.env, `/opencode/session/${encodeURIComponent(sessionId)}/message`);
+    if (!Array.isArray(live)) return;
+    if (messagesSignature(live) === messagesSignature(this.readCachedMessages(sessionId))) return;
+    this.cacheMessages(sessionId, live);
+    this.broadcast({ type: "messages", sessionID: sessionId, messages: this.readCachedMessages(sessionId) });
+  }
+
   private maybeStopBridge(): void {
     if (this.ctx.getWebSockets().length === 0) {
       this.bridgeAbort?.abort();
@@ -158,21 +184,24 @@ export class SyncHub extends DurableObject<Env> {
     const type = payload?.type;
     const props = payload?.properties || {};
 
+    // Relay the raw event FIRST, before any cache bookkeeping (same shapes the SPA already handles).
+    // message.part.updated fires once per token chunk during a response; anything awaited ahead of
+    // this broadcast — e.g. a D1 write — serializes the whole stream behind it, so the browser only
+    // sees the reply once it finishes instead of token by token.
+    this.broadcast({ type: "event", event: payload });
+
     if (type === "session.created" || type === "session.updated") {
       if (props.info?.id) this.cacheSession(props.info);
     } else if (type === "session.deleted" || type === "session.removed") {
       const id = props.info?.id || props.sessionID;
       if (id) { this.sql("DELETE FROM sessions WHERE id = ?", id); this.sql("DELETE FROM session_messages WHERE session_id = ?", id); }
     } else if (type === "message.updated" || type === "message.part.updated") {
-      await this.touchActivity();
+      this.touchActivity(); // throttled + fire-and-forget; must never block the relay loop
     } else if (type === "session.idle" && props.sessionID) {
       // Response finished — pull the authoritative messages so the cache (and offline view) is current.
       const live = await fetchUpstreamJson<any[]>(this.env, `/opencode/session/${encodeURIComponent(props.sessionID)}/message`);
       if (Array.isArray(live)) this.cacheMessages(props.sessionID, live);
     }
-
-    // Relay the raw event so clients update live (same shapes the SPA already handles).
-    this.broadcast({ type: "event", event: payload });
   }
 
   // ---------------------------------------------------------------- SQLite cache
@@ -231,16 +260,32 @@ export class SyncHub extends DurableObject<Env> {
       .map((r: any) => JSON.parse(r.data as string));
   }
 
-  private async touchActivity(): Promise<void> {
-    await this.env.DB.prepare(
+  // Stamp the idle-stop activity clock. Throttled in memory and fire-and-forget: a cross-service
+  // D1 write per streamed token would stall the SSE relay, and the cron only needs minute-level
+  // freshness (see ACTIVITY_WRITE_INTERVAL_MS).
+  private touchActivity(): void {
+    const now = Date.now();
+    if (now - this.lastActivityWrite < ACTIVITY_WRITE_INTERVAL_MS) return;
+    this.lastActivityWrite = now;
+    this.env.DB.prepare(
       `INSERT INTO activity (id, last_active_at) VALUES ('machine', ?)
        ON CONFLICT(id) DO UPDATE SET last_active_at = excluded.last_active_at`,
     )
       .bind(new Date().toISOString())
-      .run();
+      .run()
+      .catch(() => { /* best-effort; the reconcile cron self-heals on its next tick */ });
   }
 }
 
 function msToIso(ms: unknown): string | null {
   return typeof ms === "number" ? new Date(ms).toISOString() : null;
+}
+
+// Cheap "did the message list change?" fingerprint: count + the last message's id and end time.
+// Catches new turns, completions, and reverts/compactions (which change the count) without
+// serializing the whole (possibly huge) thread.
+function messagesSignature(messages: any[]): string {
+  const last = messages[messages.length - 1];
+  const t = last?.info?.time;
+  return `${messages.length}:${last?.info?.id ?? ""}:${t?.completed ?? t?.updated ?? t?.created ?? ""}`;
 }

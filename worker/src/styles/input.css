@@ -1,9 +1,8 @@
 @import "tailwindcss";
 
-/* Scan the SPA for utility classes. */
-@source "../../public/index.html";
+/* Scan the SPA for utility classes: the Astro page shells + the client modules. */
+@source "../pages/**/*.astro";
 @source "../app/**/*.js";
-@source "../../public/login.html";
 
 /* Custom palette exposed as Tailwind color utilities (bg-ink, border-line, text-accent, …). */
 @theme {
@@ -151,8 +150,18 @@
   .tool { @apply border border-line rounded-[10px] bg-panel my-2 overflow-hidden; }
   .tool > summary { @apply cursor-pointer px-3 py-2 text-[13px] flex items-center gap-2 list-none; }
   .tool > summary::-webkit-details-marker { display: none; }
-  .tool .tname { @apply font-semibold; }
-  .tool .tstate { @apply text-[11px] text-muted ml-auto; }
+  .tool .tname { @apply font-semibold shrink-0; }
+  .tool .tlabel { @apply flex-1 min-w-0 truncate text-[12px] text-muted; font-family: ui-monospace, Menlo, monospace; }
+  .tool .tstate { @apply text-[11px] text-muted ml-auto shrink-0; }
+  .tool-cmd { @apply px-3 py-2 border-t border-line text-[12.5px] whitespace-pre-wrap break-words; background: var(--color-ink); color: #cdd3db; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .tool-cmd-prompt { @apply text-accent2 font-semibold mr-1; }
+  .tool-input { @apply m-0 px-3 py-2 border-t border-line overflow-x-auto text-[12px]; background: var(--color-panel2); color: var(--color-muted); }
+  .tool .diff-stat { @apply ml-auto shrink-0 text-[11px]; font-family: ui-monospace, Menlo, monospace; }
+  .tool .diff-stat .add { color: var(--color-good); }
+  .tool .diff-stat .del { color: var(--color-bad); }
+  .tool .tlabel + .diff-stat { @apply ml-2; }
+  .tool-diff-body { @apply border-t border-line; }
+  .tool-diff-body .diff { @apply m-0 px-2 py-2 overflow-auto; max-height: 320px; }
   .tool .tstate.completed { color: var(--color-good); }
   .tool .tstate.error { color: var(--color-bad); }
   .tool .tstate.running, .tool .tstate.pending { color: var(--color-amber); }
@@ -310,6 +319,54 @@
   .md table { border-collapse: collapse; margin: 0 0 0.625rem; display: block; overflow-x: auto; }
   .md th, .md td { border: 1px solid var(--color-line); padding: 0.3rem 0.6rem; }
   .md .katex-display { margin: 0.75rem 0; overflow-x: auto; overflow-y: hidden; }
+
+  /* per-message actions (edit / revert / fork / copy / delete) — revealed on hover/focus */
+  .msg-actions { @apply flex flex-wrap items-center gap-1 mt-2 opacity-0 transition-opacity; }
+  .msg:hover .msg-actions, .msg:focus-within .msg-actions { @apply opacity-100; }
+  .msg-act { @apply h-7 px-2 inline-grid place-items-center rounded-md bg-transparent border border-line text-muted cursor-pointer text-[12px] leading-none; }
+  .msg-act:hover { @apply bg-line text-zinc-100; }
+  .msg-act.danger:hover { color: var(--color-bad); border-color: color-mix(in oklab, var(--color-bad) 45%, var(--color-line)); }
+  .msg.reverted { @apply opacity-40; }
+  @media (max-width: 767px) { .msg-actions { @apply opacity-100; } }
+
+  /* composer session tools + stop button + revert banner */
+  .composer-tools { @apply flex flex-wrap items-center gap-1 mb-2; }
+  .btn-stop { @apply text-white; background: var(--color-bad); border-color: var(--color-bad); }
+  .btn-stop:hover { background: color-mix(in oklab, var(--color-bad) 85%, black); border-color: color-mix(in oklab, var(--color-bad) 85%, black); }
+  .revert-banner { @apply flex items-center gap-3 mb-2 px-3 py-2 rounded-xl border text-[13px] text-muted; border-color: color-mix(in oklab, var(--color-amber) 40%, var(--color-line)); background: color-mix(in oklab, var(--color-amber) 10%, transparent); }
+  .revert-banner span { @apply flex-1 min-w-0; }
+
+  /* prompt navigation rail (right edge, desktop) + jump-to-latest */
+  .thread-nav { @apply absolute right-1.5 top-1/2 z-20 flex max-h-[55%] -translate-y-1/2 flex-col items-center gap-2 overflow-y-auto py-1 max-md:hidden; scrollbar-width: none; }
+  .thread-nav::-webkit-scrollbar { display: none; }
+  .thread-nav-dot { @apply h-0.5 w-4 shrink-0 rounded-full border-0 cursor-pointer transition-all; background: color-mix(in oklab, var(--color-muted) 55%, transparent); }
+  .thread-nav-dot:hover { @apply w-5; background: var(--color-muted); }
+  .thread-nav-dot[data-active] { @apply w-5; background: var(--color-accent2); }
+  .jump-bottom { @apply absolute bottom-28 left-1/2 z-20 -translate-x-1/2 rounded-full border border-line bg-panel2 px-3 py-1.5 text-[12.5px] text-zinc-100 cursor-pointer max-md:bottom-44; box-shadow: 0 6px 20px rgb(0 0 0 / .4); }
+  .jump-bottom:hover { border-color: #36404d; }
+
+  /* toasts — fixed corner stack, auto-dismissing */
+  .toast-stack { @apply fixed right-4 bottom-4 z-[60] flex flex-col items-end gap-2 pointer-events-none max-md:left-4 max-md:bottom-44; max-width: min(360px, calc(100vw - 2rem)); }
+  .toast { @apply pointer-events-auto rounded-xl border border-line bg-panel2 px-3.5 py-2.5 text-[13px] leading-snug text-zinc-100 break-words; box-shadow: 0 10px 30px rgb(0 0 0 / .45); animation: toast-in .18s ease-out; }
+  .toast.error { border-color: color-mix(in oklab, var(--color-bad) 55%, var(--color-line)); }
+  .toast.error::before { content: "⚠"; color: var(--color-bad); margin-right: 0.4em; }
+  .toast.toast-out { opacity: 0; transform: translateY(6px); transition: opacity .2s ease, transform .2s ease; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+
+  /* anchored confirmation popover — replaces native confirm() for destructive actions */
+  .confirm-overlay { @apply fixed inset-0 z-[70]; }
+  .confirm-pop { @apply fixed w-[260px] max-w-[calc(100vw-1rem)] rounded-xl border border-line bg-panel2 p-3.5 text-zinc-100; box-shadow: 0 16px 50px rgb(0 0 0 / .55); transform-origin: top center; opacity: 0; transform: scale(.96) translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
+  .confirm-pop.above { transform-origin: bottom center; transform: scale(.96) translateY(4px); }
+  .confirm-pop.in { opacity: 1; transform: none; }
+  .confirm-pop.out { opacity: 0; transform: scale(.96); }
+  .confirm-caret { @apply absolute w-2.5 h-2.5 rotate-45 bg-panel2; top: -5px; margin-left: -5px; border-top: 1px solid var(--color-line); border-left: 1px solid var(--color-line); }
+  .confirm-pop.above .confirm-caret { top: auto; bottom: -5px; border-top: 0; border-left: 0; border-bottom: 1px solid var(--color-line); border-right: 1px solid var(--color-line); }
+  .confirm-title { @apply text-[13.5px] font-medium leading-snug; }
+  .confirm-body { @apply text-[12.5px] text-muted mt-1 leading-snug break-words; }
+  .confirm-actions { @apply flex items-center justify-end gap-2 mt-3; }
+  .confirm-actions .btn { @apply text-[13px] py-1.5; }
+  .btn-danger { @apply text-white; background: var(--color-bad); border-color: var(--color-bad); }
+  .btn-danger:hover { background: color-mix(in oklab, var(--color-bad) 85%, black); border-color: color-mix(in oklab, var(--color-bad) 85%, black); }
 
   /* streaming caret */
   .caret { display: inline-block; width: 7px; height: 1.05em; background: var(--color-accent2); margin-left: 2px; vertical-align: text-bottom; animation: blink 1s steps(2) infinite; }

@@ -92,13 +92,19 @@ export async function isMachineStarted(env: Env): Promise<boolean> {
 }
 
 // Best-effort GET against the Fly box (control server). Returns null on any failure. Only call
-// when the machine is known to be started, or it will wake it.
-export async function fetchUpstreamJson<T>(env: Env, path: string): Promise<T | null> {
+// when the machine is known to be started, or it will wake it. Time-boxed with an AbortController
+// so a slow or wedged box (e.g. opencode stuck behind a hung agent request) can't hang the caller
+// indefinitely — callers fall back to their cache on null.
+export async function fetchUpstreamJson<T>(env: Env, path: string, timeoutMs = 12_000): Promise<T | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(new URL(path, env.FLY_BASE_URL), { headers: upstreamHeaders(env) });
+    const res = await fetch(new URL(path, env.FLY_BASE_URL), { headers: upstreamHeaders(env), signal: ctrl.signal });
     if (!res.ok) return null;
     return await res.json<T>();
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
