@@ -34,6 +34,7 @@ const SECTIONS = [
   { id: "github", label: "GitHub", indent: true },
   { id: "fly", label: "Fly.io", indent: true },
   { id: "notifications", label: "Notifications", indent: true },
+  { id: "system", label: "System prompt" },
   { id: "billing", label: "Billing / budgets" },
 ];
 
@@ -255,7 +256,8 @@ function renderGithub() {
     "GitHub",
     "Connect a GitHub account so agents can clone, push, and open PRs. Tokens are encrypted at rest.",
     `<form id="gh-form" class="settings-form">
-       ${c ? `<div class="connector-status">Connected ${c.config?.username ? `as <b>${esc(c.config.username)}</b>` : ""} · token ••••${esc(c.secretLast4 || "")}</div>` : ""}
+       ${c ? `<div class="connector-status">Connected ${c.config?.username ? `as <b>${esc(c.config.username)}</b>` : ""} · token ••••${esc(c.secretLast4 || "")}
+         <button type="button" id="gh-sync" class="btn btn-ghost ml-2">Sync to machine</button></div>` : ""}
        ${field("Auth method", `
          <div class="radio-row">
            <label class="radio"><input type="radio" name="gh-auth" value="pat" ${authMethod === "pat" ? "checked" : ""}> Personal access token</label>
@@ -294,6 +296,14 @@ function renderGithub() {
   });
 
   content.querySelector("#gh-remove")?.addEventListener("click", () => removeConnector(c, "GitHub"));
+  content.querySelector("#gh-sync")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const res = await request("/api/github/sync", { method: "POST" });
+      toast(res.ok ? "Synced to machine — git + gh are authenticated" : res.reason === "machine_off" ? "Machine is off — syncs on next start" : "Sync failed");
+    } catch (err) { toast("Sync failed: " + err.message); }
+    finally { e.target.disabled = false; }
+  });
 }
 
 // ---------------------------------------------------------------- Fly.io
@@ -448,10 +458,64 @@ const RENDERERS = {
   github: renderGithub,
   fly: renderFly,
   notifications: renderNotifications,
+  system: renderSystemPrompt,
   orgs: renderPlaceholder,
   projects: renderPlaceholder,
   billing: renderPlaceholder,
 };
+
+// System prompt (the box's AGENTS.md). View the current prompt, save an override that persists
+// across machine reboots, or reset to the box default.
+async function renderSystemPrompt() {
+  content.innerHTML = panel("System prompt", "Loading…", "");
+  let data;
+  try {
+    data = await request("/api/system-prompt");
+  } catch {
+    content.innerHTML = panel("System prompt", "Could not load the system prompt.", "");
+    return;
+  }
+  const isCustom = data.source === "custom";
+  const note = isCustom
+    ? "Using your custom prompt (overrides the box default; persists across reboots)."
+    : data.boxReachable
+      ? "Showing the box default. Edit and save to override it."
+      : "Machine is off — showing your saved prompt or empty. Start the machine to load the live default.";
+
+  content.innerHTML = panel(
+    "System prompt",
+    "The agent instructions (AGENTS.md) loaded for every session — includes the UI-artifact protocol.",
+    `<form id="sp-form" class="settings-form">
+       <div class="connector-status">${esc(note)}</div>
+       ${field("Prompt", `<textarea id="sp-text" class="field" rows="16" style="min-height:280px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px"></textarea>`)}
+       <div class="settings-form-actions">
+         <button type="button" id="sp-reset" class="btn btn-ghost text-bad" ${isCustom ? "" : "disabled"}>Reset to default</button>
+         <span class="flex-1"></span>
+         <button type="submit" class="btn btn-primary">Save override</button>
+       </div>
+     </form>`,
+  );
+  content.querySelector("#sp-text").value = data.content || "";
+
+  content.querySelector("#sp-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = JSON.stringify({ content: content.querySelector("#sp-text").value });
+    try {
+      const res = await request("/api/system-prompt", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
+      toast(res.applied ? "Saved and applied to the machine" : "Saved — applies when the machine starts");
+      render();
+    } catch (err) { toast("Save failed: " + err.message); }
+  });
+
+  content.querySelector("#sp-reset").addEventListener("click", async () => {
+    if (!confirm("Reset to the box default prompt?")) return;
+    try {
+      await request("/api/system-prompt", { method: "DELETE" });
+      toast("Reset to default");
+      render();
+    } catch (err) { toast("Reset failed: " + err.message); }
+  });
+}
 
 // ---------------------------------------------------------------- wiring
 

@@ -4,6 +4,14 @@ RUN apt-get update && apt-get install -y \
   git openssh-client ca-certificates curl bash ripgrep sudo nano tmux \
   && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI — so agents can `gh issue create`, open PRs, etc. (authenticated at runtime).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update && apt-get install -y gh \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN useradd -m -s /bin/bash dev \
   && echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 

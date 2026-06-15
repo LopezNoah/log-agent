@@ -1,6 +1,20 @@
 import type { Hono } from "hono";
 import type { Env } from "./env";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { isMachineStarted } from "./fly";
+import { pushGithubCredential, pushLlmCredential } from "./box";
+
+// After saving an LLM/GitHub connector, push it to the box if it's up, so the credential applies
+// without a restart. Best-effort and backgrounded via waitUntil — never blocks the response.
+async function syncToBox(env: Env, type: string): Promise<void> {
+  try {
+    if (!(await isMachineStarted(env))) return;
+    if (type === "llm") await pushLlmCredential(env);
+    else if (type === "github") await pushGithubCredential(env);
+  } catch {
+    /* box unreachable — it'll sync on next machine start */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Connectors: bring-your-own credentials for LLM providers, GitHub, Fly.io, and
@@ -120,6 +134,7 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
         cipher?.ct ?? null, cipher?.iv ?? null, secret ? last4(secret) : null, isDefault, now, now)
       .run();
 
+    c.executionCtx.waitUntil(syncToBox(c.env, type));
     return c.json({ connector: serialize((await getRow(c.env, id))!) });
   });
 
@@ -156,6 +171,7 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
       .bind(provider, label, config, ct, iv, l4, isoNow(), row.id)
       .run();
 
+    c.executionCtx.waitUntil(syncToBox(c.env, row.type));
     return c.json({ connector: serialize((await getRow(c.env, row.id))!) });
   });
 
@@ -179,6 +195,7 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
     if (!row) return c.json({ error: "not_found" }, 404);
     await c.env.DB.prepare("UPDATE connectors SET is_default = 0 WHERE type = ?").bind(row.type).run();
     await c.env.DB.prepare("UPDATE connectors SET is_default = 1 WHERE id = ?").bind(row.id).run();
+    c.executionCtx.waitUntil(syncToBox(c.env, row.type));
     return c.json({ ok: true });
   });
 
@@ -194,23 +211,6 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
 }
 
 // ---------------------------------------------------------------- helpers used by the Worker
-
-export interface LlmCredential {
-  provider: string;
-  model: string | null;
-  key: string;
-}
-
-// The default LLM connector, decrypted — what the Worker pushes to opencode at runtime.
-export async function getDefaultLlmCredential(env: Env): Promise<LlmCredential | null> {
-  const row = await env.DB.prepare(
-    "SELECT * FROM connectors WHERE type = 'llm' AND is_default = 1 LIMIT 1",
-  ).first<ConnectorRow>();
-  if (!row?.secret_ciphertext || !row.secret_iv) return null;
-  const key = await decryptSecret(env, row.secret_ciphertext, row.secret_iv);
-  const config = row.config ? safeParse(row.config) : {};
-  return { provider: row.provider, model: (config.model as string) || null, key };
-}
 
 // Fan a message out to every stored notification connector (Slack/Discord/webhook).
 export async function fanOutNotification(env: Env, text: string): Promise<void> {

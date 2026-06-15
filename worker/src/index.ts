@@ -3,11 +3,20 @@ import type { Env } from "./env";
 import {
   ensureFlyMachineStarted,
   ensureFlyMachineStopped,
+  fetchUpstreamJson,
   flyMachineStatus,
+  isMachineStarted,
   upstreamHeaders,
 } from "./fly";
 import { registerAuthRoutes, requireSession } from "./auth";
-import { fanOutNotification, getDefaultLlmCredential, registerConnectorRoutes } from "./connectors";
+import { fanOutNotification, registerConnectorRoutes } from "./connectors";
+import {
+  getSystemPromptOverride,
+  pushAllToBox,
+  pushGithubCredential,
+  pushSystemPrompt,
+  setSystemPromptOverride,
+} from "./box";
 
 export { SyncHub } from "./sync-hub";
 
@@ -57,7 +66,7 @@ app.get("/api/machine", async (c) => {
 app.post("/api/machine/start", async (c) => {
   await ensureFlyMachineStarted(c.env);
   await touchActivity(c.env);
-  if (await waitForHealth(c.env)) await pushCredential(c.env).catch(() => {});
+  if (await waitForHealth(c.env)) await pushAllToBox(c.env);
   return c.json({ ok: true });
 });
 
@@ -72,6 +81,50 @@ app.post("/api/machine/stop", async (c) => {
 // ---------------------------------------------------------------------------
 
 registerConnectorRoutes(app);
+
+// Push the stored GitHub PAT to the box now (used by the Settings "Sync now" button). Only
+// meaningful while the machine is up; otherwise it's a no-op that reports not-synced.
+app.post("/api/github/sync", async (c) => {
+  if (!(await isMachineStarted(c.env))) return c.json({ ok: false, reason: "machine_off" });
+  const ok = await pushGithubCredential(c.env).then(() => true).catch(() => false);
+  return c.json({ ok });
+});
+
+// ---------------------------------------------------------------------------
+// System prompt (AGENTS.md) — view the current prompt, save an override, or reset to default
+// ---------------------------------------------------------------------------
+
+app.get("/api/system-prompt", async (c) => {
+  const override = await getSystemPromptOverride(c.env);
+  // Show the live box AGENTS.md as the "default" when no override and the box is reachable.
+  let boxContent: string | null = null;
+  if (await isMachineStarted(c.env)) {
+    const res = await fetchUpstreamJson<{ content?: string }>(c.env, "/agents");
+    boxContent = res?.content ?? null;
+  }
+  return c.json({
+    content: override ?? boxContent ?? "",
+    source: override != null ? "custom" : "default",
+    boxReachable: boxContent != null,
+  });
+});
+
+app.put("/api/system-prompt", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { content?: string };
+  const content = typeof body.content === "string" ? body.content : "";
+  await setSystemPromptOverride(c.env, content);
+  // Apply immediately if the box is up; otherwise it lands on next start.
+  let applied = false;
+  if (await isMachineStarted(c.env)) {
+    applied = await pushSystemPrompt(c.env).then(() => true).catch(() => false);
+  }
+  return c.json({ ok: true, applied });
+});
+
+app.delete("/api/system-prompt", async (c) => {
+  await setSystemPromptOverride(c.env, null);
+  return c.json({ ok: true });
+});
 
 // Unmatched API routes are 404 JSON; everything else is the static SPA.
 app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
@@ -102,7 +155,7 @@ async function proxyToFly(request: Request, env: Env): Promise<Response> {
   if (!(await waitForHealth(env))) {
     return Response.json({ error: "machine_unavailable" }, { status: 503 });
   }
-  await pushCredential(env).catch(() => {});
+  await pushAllToBox(env);
   return fetch(buildUpstreamUrl(request, env), buildUpstreamInit(request, env));
 }
 
@@ -165,24 +218,6 @@ async function touchActivity(env: Env): Promise<void> {
 async function readActivity(env: Env): Promise<number> {
   const row = await env.DB.prepare("SELECT last_active_at FROM activity WHERE id = 'machine'").first<{ last_active_at: string }>();
   return row?.last_active_at ? new Date(row.last_active_at).getTime() : 0;
-}
-
-// ---------------------------------------------------------------------------
-// Provider credential push to opencode (default LLM connector)
-// ---------------------------------------------------------------------------
-
-async function pushCredential(env: Env): Promise<void> {
-  const cred = await getDefaultLlmCredential(env);
-  if (!cred) return;
-
-  const headers = upstreamHeaders(env);
-  headers.set("Content-Type", "application/json");
-  const res = await fetch(new URL(`/opencode/auth/${encodeURIComponent(cred.provider)}`, env.FLY_BASE_URL), {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ type: "api", key: cred.key }),
-  });
-  if (!res.ok) throw new Error(`auth push failed: ${res.status}`);
 }
 
 // ---------------------------------------------------------------------------

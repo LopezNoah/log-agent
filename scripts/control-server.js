@@ -1,6 +1,11 @@
 const http = require("node:http");
 const net = require("node:net");
-const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawn, execFileSync } = require("node:child_process");
+
+const HOME = process.env.HOME || "/home/dev";
+const AGENTS_PATH = path.join(HOME, ".config", "opencode", "AGENTS.md");
 
 const host = "0.0.0.0";
 const port = Number(process.env.PORT || "8080");
@@ -43,6 +48,36 @@ function json(res, status, body) {
   res.end(`${JSON.stringify(body)}\n`);
 }
 
+function readBody(req) {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > 2_000_000) req.destroy(); // 2MB guard
+    });
+    req.on("end", () => {
+      try { resolve(JSON.parse(data || "{}")); } catch { resolve(null); }
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
+// Configure git + gh to use a pushed GitHub token. Writes the git credential store and gh's
+// hosts.yml so both `git push` and `gh issue create` work without the token in the environment.
+function configureGithub(token, username) {
+  const user = username || "x-access-token";
+  fs.writeFileSync(path.join(HOME, ".git-credentials"), `https://${user}:${token}@github.com\n`, { mode: 0o600 });
+  try { execFileSync("git", ["config", "--global", "credential.helper", "store"]); } catch { /* best effort */ }
+
+  const ghDir = path.join(HOME, ".config", "gh");
+  fs.mkdirSync(ghDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(ghDir, "hosts.yml"),
+    `github.com:\n    oauth_token: ${token}\n    user: ${user}\n    git_protocol: https\n`,
+    { mode: 0o600 },
+  );
+}
+
 // Stream a request through to an upstream HTTP service. SSE and chunked responses pass
 // through untouched because we pipe the upstream response body directly.
 function proxyHttp(req, res, { upstreamHost, upstreamPort, path, extraHeaders = {} }) {
@@ -79,6 +114,48 @@ const server = http.createServer((req, res) => {
   }
 
   if (!requireAuth(req, res)) return;
+
+  // GitHub auth: the Worker pushes the stored PAT here so git + gh are authenticated.
+  if (rawUrl === "/github/auth") {
+    if (req.method === "GET") {
+      const connected = fs.existsSync(path.join(HOME, ".config", "gh", "hosts.yml"));
+      return void json(res, 200, { connected });
+    }
+    if (req.method === "PUT") {
+      return void readBody(req).then((body) => {
+        if (!body || !body.token) return json(res, 400, { error: "missing_token" });
+        try {
+          configureGithub(String(body.token), String(body.username || ""));
+          json(res, 200, { ok: true });
+        } catch (e) {
+          json(res, 500, { error: "configure_failed", message: String(e && e.message || e) });
+        }
+      });
+    }
+    return void json(res, 405, { error: "method_not_allowed" });
+  }
+
+  // System prompt (AGENTS.md): the Worker reads/writes it to support viewing + editing.
+  if (rawUrl === "/agents") {
+    if (req.method === "GET") {
+      let content = "";
+      try { content = fs.readFileSync(AGENTS_PATH, "utf8"); } catch { /* not written yet */ }
+      return void json(res, 200, { content });
+    }
+    if (req.method === "PUT") {
+      return void readBody(req).then((body) => {
+        if (!body || typeof body.content !== "string") return json(res, 400, { error: "missing_content" });
+        try {
+          fs.mkdirSync(path.dirname(AGENTS_PATH), { recursive: true });
+          fs.writeFileSync(AGENTS_PATH, body.content);
+          json(res, 200, { ok: true });
+        } catch (e) {
+          json(res, 500, { error: "write_failed", message: String(e && e.message || e) });
+        }
+      });
+    }
+    return void json(res, 405, { error: "method_not_allowed" });
+  }
 
   // /opencode/* -> opencode headless server (REST + SSE).
   if (rawUrl === "/opencode" || rawUrl.startsWith("/opencode/")) {

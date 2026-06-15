@@ -75,6 +75,12 @@ use the types below.
   { "id": "2", "text": "Write tests" }
 ] } }
 ```
+
+# Environment
+
+`git` and the GitHub CLI (`gh`) are authenticated when a GitHub token is configured. Use `gh`
+for GitHub tasks — e.g. `gh issue create --title ... --body ...`, `gh pr create`, `gh repo clone`.
+Pass `-R owner/repo` when you're not inside the target repository.
 AGENTSEOF
 
 # Leading fragment for opencode.json (trailing comma; the no-extra-fields case strips it).
