@@ -7,7 +7,7 @@ export interface Env {
   CONTROL_PASSWORD: string;
   FLY_API_TOKEN: string;
   FLY_APP_NAME: string;
-  FLY_MACHINE_ID: string;
+  FLY_MACHINE_ID?: string; // optional override; normally resolved by listing the app's machines
   FLY_ORG_SLUG?: string;
   FLY_BASE_URL: string;
   FLY_UPSTREAM_AUTHORIZATION?: string;

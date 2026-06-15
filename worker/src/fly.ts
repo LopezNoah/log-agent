@@ -20,18 +20,54 @@ export async function flyRequest(env: Env, path: string, init: RequestInit = {})
     },
   });
 
-  if (!response.ok) throw new Error(`Fly API ${response.status}: ${await response.text()}`);
+  if (!response.ok) {
+    const err = new Error(`Fly API ${response.status}: ${await response.text()}`) as Error & { status?: number };
+    err.status = response.status;
+    throw err;
+  }
   if (response.status === 204) return {};
   const text = await response.text();
   return text ? JSON.parse(text) : {};
 }
 
+// We resolve the machine by listing the app's machines rather than pinning a machine ID, so the
+// Worker keeps working when the box is destroyed/recreated (e.g. a region change). The resolved
+// id is cached per isolate and self-heals: a 404 (stale id) clears the cache and re-resolves.
+// An explicit FLY_MACHINE_ID still wins, if ever set.
+let cachedMachineId: string | null = null;
+
+async function resolveMachineId(env: Env): Promise<string> {
+  if (env.FLY_MACHINE_ID) return env.FLY_MACHINE_ID;
+  if (cachedMachineId) return cachedMachineId;
+  const data = await flyRequest(env, `/apps/${env.FLY_APP_NAME}/machines`);
+  const machines = (Array.isArray(data) ? data : []) as Array<Record<string, any>>;
+  // Prefer the "app" process group; otherwise just take the first machine.
+  const machine = machines.find((m) => m?.config?.process_group === "app") || machines[0];
+  if (!machine?.id) throw new Error("no Fly machines found for app");
+  cachedMachineId = String(machine.id);
+  return cachedMachineId;
+}
+
+// Perform a per-machine request, re-resolving once if the cached id is stale (machine recreated).
+async function machineRequest(env: Env, suffix: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+  const id = await resolveMachineId(env);
+  try {
+    return await flyRequest(env, `/apps/${env.FLY_APP_NAME}/machines/${id}${suffix}`, init);
+  } catch (e) {
+    const stale = !env.FLY_MACHINE_ID && (e as { status?: number })?.status === 404;
+    if (!stale) throw e;
+    cachedMachineId = null;
+    const fresh = await resolveMachineId(env);
+    return flyRequest(env, `/apps/${env.FLY_APP_NAME}/machines/${fresh}${suffix}`, init);
+  }
+}
+
 export async function flyMachineStatus(env: Env): Promise<Record<string, unknown>> {
-  return flyRequest(env, `/apps/${env.FLY_APP_NAME}/machines/${env.FLY_MACHINE_ID}`);
+  return machineRequest(env, "");
 }
 
 export async function flyMachineAction(env: Env, action: "start" | "stop"): Promise<Record<string, unknown>> {
-  return flyRequest(env, `/apps/${env.FLY_APP_NAME}/machines/${env.FLY_MACHINE_ID}/${action}`, { method: "POST" });
+  return machineRequest(env, `/${action}`, { method: "POST" });
 }
 
 export async function ensureFlyMachineStarted(env: Env): Promise<void> {

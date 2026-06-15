@@ -8,9 +8,10 @@ binding = "ASSETS"
 run_worker_first = true
 not_found_handling = "single-page-application"
 
+# FLY_MACHINE_ID is intentionally unset — the Worker resolves the machine by listing
+# FLY_APP_NAME's machines, so recreating the box (e.g. a region change) never breaks it.
 [vars]
 FLY_APP_NAME = "opencode-phone"
-FLY_MACHINE_ID = "48ee1e1a719978"
 FLY_ORG_SLUG = "personal"
 FLY_BASE_URL = "https://opencode-phone.fly.dev"
 IDLE_STOP_SECONDS = "3600"
