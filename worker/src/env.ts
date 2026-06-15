@@ -8,6 +8,7 @@ export interface Env {
   FLY_API_TOKEN: string;
   FLY_APP_NAME: string;
   FLY_MACHINE_ID: string;
+  FLY_ORG_SLUG?: string;
   FLY_BASE_URL: string;
   FLY_UPSTREAM_AUTHORIZATION?: string;
   IDLE_STOP_SECONDS?: string;

@@ -8,6 +8,7 @@ const content = document.getElementById("settings-content");
 const nav = document.getElementById("settings-nav");
 
 let connectors = []; // cached list from the API
+let envMeta = {}; // deployment-level info (e.g. whether a Fly env token is configured)
 let active = "llm";
 
 // ---------------------------------------------------------------- provider metadata
@@ -66,8 +67,9 @@ function announceChange() {
 }
 
 async function reload() {
-  const { connectors: list } = await request("/api/connectors");
+  const { connectors: list, env } = await request("/api/connectors");
   connectors = list || [];
+  envMeta = env || {};
 }
 
 // ---------------------------------------------------------------- shell
@@ -294,13 +296,18 @@ function renderFly() {
   const c = byType("fly")[0];
   const cfg = c?.config || {};
   const sizeOpts = VM_SIZES.map((s) => `<option value="${s}" ${cfg.maxVmSize === s ? "selected" : ""}>${s}</option>`).join("");
+  // The deployment's FLY_API_TOKEN drives machine start/stop today; a BYO token is an override.
+  const envBanner = envMeta.flyToken
+    ? `<div class="connector-status">✓ Using the deployment's Fly token${envMeta.flyOrgSlug ? ` (org <b>${esc(envMeta.flyOrgSlug)}</b>)` : ""} — this powers machine start/stop today. Add a token below only to override it.</div>`
+    : `<div class="connector-status text-bad">No Fly token configured on the deployment. Machine start/stop will fail until one is set.</div>`;
 
   content.innerHTML = panel(
     "Fly.io",
-    "Bring your own Fly token so agents run on your account. (Not yet wired to machine provisioning.)",
+    "Fly runs the machine behind your agents. A bring-your-own token here would override the deployment token (BYO is not yet wired to provisioning).",
     `<form id="fly-form" class="settings-form">
-       ${c ? `<div class="connector-status">Connected · token ••••${esc(c.secretLast4 || "")}</div>` : ""}
-       ${field("Fly API token", `<input id="fly-token" type="password" autocomplete="off" class="field" placeholder="${c ? esc(secretPlaceholder(c)) : "FlyV1 …"}">`)}
+       ${envBanner}
+       ${c ? `<div class="connector-status">BYO override saved · token ••••${esc(c.secretLast4 || "")}</div>` : ""}
+       ${field("Fly API token (override)", `<input id="fly-token" type="password" autocomplete="off" class="field" placeholder="${c ? esc(secretPlaceholder(c)) : "FlyV1 …"}">`)}
        ${field("Organization slug", `<input id="fly-org" class="field" value="${esc(cfg.orgSlug || "")}" placeholder="personal">`)}
        ${field("Max VM size", `<select id="fly-size" class="field">${sizeOpts}</select>`)}
        ${field("Max idle minutes", `<input id="fly-idle" type="number" min="1" class="field" value="${esc(cfg.maxIdleMinutes ?? 60)}">`, "Auto-stop idle machines after this many minutes.")}

@@ -82,7 +82,12 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
     const { results } = await c.env.DB.prepare(
       "SELECT * FROM connectors ORDER BY type, is_default DESC, updated_at DESC",
     ).all<ConnectorRow>();
-    return c.json({ connectors: (results || []).map(serialize) });
+    // `env` surfaces deployment-level credentials the UI should reflect but can't read back —
+    // notably the Fly token, which powers machine start/stop today (see fly.ts).
+    return c.json({
+      connectors: (results || []).map(serialize),
+      env: { flyToken: !!c.env.FLY_API_TOKEN, flyOrgSlug: c.env.FLY_ORG_SLUG || null },
+    });
   });
 
   app.post("/api/connectors", async (c) => {
