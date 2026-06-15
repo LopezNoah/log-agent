@@ -3,6 +3,7 @@
 // it already used to load this page. Live updates arrive over the /opencode/event SSE stream.
 
 import { openSettings } from "./settings.js";
+import { mountArtifact, parseRichText } from "./artifacts.js";
 
 const $ = (sel) => document.querySelector(sel);
 const els = {
@@ -419,6 +420,9 @@ function orderedMessages() {
 function renderThread(scroll = false) {
   const nearBottom = els.thread.scrollHeight - els.thread.scrollTop - els.thread.clientHeight < 120;
   els.thread.querySelectorAll(".msg").forEach((n) => n.remove());
+  mountQueue = []; // artifact placeholders to hydrate after innerHTML is in place
+
+  renderPinned();
 
   for (const m of orderedMessages()) {
     const node = document.createElement("div");
@@ -428,6 +432,7 @@ function renderThread(scroll = false) {
     els.thread.appendChild(node);
   }
 
+  drainArtifacts();
   renderUsageTotal();
   if (scroll || nearBottom) els.thread.scrollTop = els.thread.scrollHeight;
 }
@@ -440,11 +445,12 @@ function renderUser(m) {
 function renderAssistant(m) {
   let html = "";
   let streaming = !m.info.time?.completed;
+  const artCtr = { n: 0 }; // per-message artifact index, for stable ids
   for (const id of m.order) {
     const p = m.parts.get(id);
     if (!p || p.ignored) continue;
     if (p.type === "text" || p.type === "reasoning") {
-      if (p.text) html += renderMarkdown(p.text);
+      if (p.text) html += renderRichText(p.text, m.info.id, artCtr);
     } else if (p.type === "tool") {
       html += renderTool(p);
     }
@@ -453,6 +459,97 @@ function renderAssistant(m) {
   if (streaming) html += `<span class="caret"></span>`;
   else html += renderUsage(m.info);
   return html;
+}
+
+// --------------------------------------------------------------------------- UI artifacts
+
+let mountQueue = [];                  // [{ domId, spec }] to hydrate after innerHTML is set
+const artifactState = new Map();      // ephemeral per-artifact UI state (survives re-renders)
+
+// Render assistant text that may contain fenced ```ui artifact blocks. Markdown segments go
+// through the normal pipeline; artifact segments become placeholder slots hydrated by drainArtifacts.
+function renderRichText(text, msgId, ctr) {
+  let html = "";
+  for (const seg of parseRichText(text)) {
+    if (seg.kind === "md") {
+      html += renderMarkdown(seg.text);
+    } else if (seg.kind === "pending") {
+      html += `<div class="artifact-pending">▦ building UI…</div>`;
+    } else {
+      const id = `${msgId}-${ctr.n++}`;
+      seg.spec.__id = id;
+      const domId = "art_" + id.replace(/[^A-Za-z0-9_-]/g, "");
+      mountQueue.push({ domId, spec: seg.spec });
+      html += `<div class="artifact-slot" id="${domId}"></div>`;
+    }
+  }
+  return html;
+}
+
+function drainArtifacts() {
+  for (const { domId, spec } of mountQueue) {
+    const slot = document.getElementById(domId);
+    if (slot) mountArtifact(slot, spec, artifactCtx(spec));
+  }
+  mountQueue = [];
+}
+
+// Host integration handed to each widget — no widget touches globals directly.
+function artifactCtx(spec) {
+  const id = spec.__id;
+  return {
+    state: { get: () => artifactState.get(id), set: (v) => artifactState.set(id, v) },
+    sendText: (t) => sendText(t),
+    toast,
+    openUrl: (u) => { if (u) window.open(u, "_blank", "noopener"); },
+    isPinned: (aid) => pinsFor(state.activeId).some((p) => p.__id === aid),
+    togglePin: (s) => togglePin(s),
+  };
+}
+
+// --------------------------------------------------------------------------- pinned widgets
+
+const PIN_KEY = "oc.pins"; // { [sessionId]: UIArtifact[] }
+
+function allPins() {
+  try { return JSON.parse(localStorage.getItem(PIN_KEY)) || {}; } catch { return {}; }
+}
+function pinsFor(sessionId) {
+  return (sessionId && allPins()[sessionId]) || [];
+}
+function setPinsFor(sessionId, pins) {
+  const all = allPins();
+  if (pins.length) all[sessionId] = pins; else delete all[sessionId];
+  localStorage.setItem(PIN_KEY, JSON.stringify(all));
+}
+function togglePin(spec) {
+  if (!state.activeId) return;
+  const pins = pinsFor(state.activeId);
+  const i = pins.findIndex((p) => p.__id === spec.__id);
+  if (i >= 0) pins.splice(i, 1);
+  else pins.push({ type: spec.type, props: spec.props, __id: spec.__id });
+  setPinsFor(state.activeId, pins);
+  renderThread();
+}
+
+// Pinned artifacts render in a sticky section at the top of the thread and persist (localStorage)
+// across reloads for that session, unlike ephemeral in-message widgets.
+function renderPinned() {
+  const pins = pinsFor(state.activeId);
+  if (!pins.length) return;
+  const sec = document.createElement("div");
+  sec.className = "msg pinned-section";
+  sec.innerHTML = `<div class="role">📌 pinned</div>`;
+  for (let i = 0; i < pins.length; i++) {
+    const spec = pins[i];
+    const domId = "pin_" + String(spec.__id || i).replace(/[^A-Za-z0-9_-]/g, "");
+    const slot = document.createElement("div");
+    slot.className = "artifact-slot";
+    slot.id = domId;
+    sec.appendChild(slot);
+    mountQueue.push({ domId, spec });
+  }
+  els.thread.appendChild(sec);
 }
 
 function fmtTokens(n) {
@@ -530,13 +627,19 @@ els.input.addEventListener("input", () => {
   els.input.style.height = Math.min(els.input.scrollHeight, 220) + "px";
 });
 
-async function send() {
+function send() {
   const text = els.input.value.trim();
-  if (!text || !state.activeId) return;
+  if (!text) return;
   els.input.value = "";
   els.input.style.height = "auto";
+  sendText(text);
+}
 
-  // Optimistic user bubble; replaced when the server echoes the real message.
+// Post a message to the active session (used by the composer and by artifact widgets, e.g. a
+// submitted form). Optimistically shows the user bubble until the server echoes the real message.
+async function sendText(text) {
+  if (!text || !state.activeId) return;
+
   const localId = "local-" + Date.now();
   state.messages.set(localId, {
     info: { id: localId, role: "user", sessionID: state.activeId, time: { created: Date.now() } },

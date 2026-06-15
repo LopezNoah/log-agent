@@ -4,6 +4,7 @@
 @source "../../public/index.html";
 @source "../../public/app.js";
 @source "../../public/settings.js";
+@source "../../public/artifacts.js";
 @source "../../public/login.html";
 
 /* Custom palette exposed as Tailwind color utilities (bg-ink, border-line, text-accent, …). */
@@ -63,6 +64,70 @@
   /* token usage — per-message footer + running session-total chip */
   .usage { @apply mt-2.5 pt-2 border-t border-line text-[11.5px] text-muted; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .usage-total { @apply absolute top-2 right-3 z-10 text-[11.5px] text-muted bg-panel2/85 border border-line rounded-full px-2.5 py-1 pointer-events-none max-md:top-3 max-md:right-3; font-family: ui-monospace, "SF Mono", Menlo, monospace; backdrop-filter: blur(4px); }
+
+  /* ---- UI artifacts (model-described widgets) ---- */
+  .artifact-slot { @apply my-2.5; }
+  .artifact-pending { @apply my-2.5 text-[13px] text-muted italic; }
+  .pinned-section .widget { border-color: color-mix(in oklab, var(--color-accent) 35%, var(--color-line)); }
+
+  .widget { @apply border border-line rounded-xl bg-panel overflow-hidden my-2.5; }
+  .widget-head { @apply flex items-center gap-2 px-3.5 py-2.5 border-b border-line bg-panel2; }
+  .widget-title { @apply flex items-center gap-2 font-semibold text-[13.5px] min-w-0; }
+  .widget-title > span:last-child { @apply truncate; }
+  .widget-icon { @apply text-muted; }
+  .widget-actions { @apply flex items-center gap-1 ml-auto shrink-0; }
+  .widget-act { @apply h-7 px-2 grid place-items-center rounded-md bg-transparent border border-line text-muted cursor-pointer text-[12px]; }
+  .widget-act:hover { @apply bg-line text-zinc-100; }
+  .widget-body { @apply p-3.5; }
+  .widget-buttons { @apply flex flex-wrap items-center gap-2; }
+  .widget-pill { @apply text-[11px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded; }
+  .widget-pill.good { color: var(--color-good); background: color-mix(in oklab, var(--color-good) 18%, transparent); }
+  .widget-pill.amber { color: var(--color-amber); background: color-mix(in oklab, var(--color-amber) 18%, transparent); }
+  .widget-pill.bad { color: var(--color-bad); background: color-mix(in oklab, var(--color-bad) 18%, transparent); }
+  .widget-pill.muted { color: var(--color-muted); background: var(--color-panel2); }
+  .widget-raw pre { @apply mt-2 p-2 rounded-lg overflow-x-auto text-[12px]; background: var(--color-ink); }
+  .widget-form { @apply flex flex-col gap-3; }
+
+  /* checklist */
+  .check-list { @apply flex flex-col gap-1.5; }
+  .check-item { @apply flex items-start gap-2.5 cursor-pointer text-[14px] leading-snug; }
+  .check-item input { @apply mt-0.5; accent-color: var(--color-accent); cursor: pointer; }
+  .check-item.done .check-text { @apply line-through text-muted; }
+
+  /* table */
+  .table-wrap { @apply overflow-x-auto; }
+  .widget-table { @apply w-full text-[13px] border-collapse; }
+  .widget-table th, .widget-table td { @apply border border-line px-2.5 py-1.5 text-left; }
+  .widget-table th { @apply bg-panel2 font-semibold; }
+
+  /* status */
+  .status-grid { @apply flex flex-col gap-2; }
+  .status-row { @apply flex items-center gap-2.5 text-[13.5px]; }
+  .status-dot { @apply w-2.5 h-2.5 rounded-full shrink-0; background: var(--color-muted); }
+  .status-dot.good { background: var(--color-good); box-shadow: 0 0 8px var(--color-good); }
+  .status-dot.amber { background: var(--color-amber); }
+  .status-dot.bad { background: var(--color-bad); }
+  .status-key { @apply text-muted capitalize; }
+  .status-val { @apply ml-auto font-medium; }
+
+  /* diff */
+  .diff { @apply m-0 overflow-x-auto text-[12.5px] leading-[1.5]; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .diff-line { @apply flex whitespace-pre; }
+  .diff-gutter { @apply select-none w-5 shrink-0 text-center text-muted; }
+  .diff-text { @apply flex-1 px-1; }
+  .diff-line.add { background: color-mix(in oklab, var(--color-good) 16%, transparent); }
+  .diff-line.del { background: color-mix(in oklab, var(--color-bad) 16%, transparent); }
+  .diff-line.empty { background: var(--color-panel2); min-height: 1.5em; }
+  .diff-split { @apply grid grid-cols-2 gap-px; background: var(--color-line); }
+  .diff-col { @apply bg-panel; }
+
+  /* preview + command */
+  .preview-top { @apply flex items-center gap-2 mb-3 text-[13px]; }
+  .preview-url { @apply text-muted truncate; font-family: ui-monospace, Menlo, monospace; }
+  .command-line { @apply flex items-center gap-2 text-[13px]; }
+  .command-prompt { @apply text-accent2 font-semibold; }
+  .command-line code { @apply flex-1 truncate; font-family: ui-monospace, Menlo, monospace; }
+  .command-out { @apply mt-2.5 m-0 p-2.5 rounded-lg overflow-x-auto text-[12.5px] whitespace-pre-wrap; background: var(--color-ink); color: #cdd3db; max-height: 320px; }
 
   /* tool call disclosure */
   .tool { @apply border border-line rounded-[10px] bg-panel my-2 overflow-hidden; }

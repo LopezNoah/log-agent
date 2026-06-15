@@ -86,3 +86,26 @@ only ever returns the last 4 chars. Types:
   all of them (plus the legacy `NOTIFY_WEBHOOK_URL`).
 
 Account / Organizations / Projects / Billing are scaffolded placeholders in the Settings UI.
+
+## UI artifacts (ephemeral widgets)
+
+The assistant can render interactive widgets inline by emitting a fenced **`ui`** block of JSON —
+a UI *description*, never HTML. The frontend (`public/artifacts.js`) parses it and renders with a
+trusted, hand-built component; no model output is ever executed. Unknown types / invalid JSON fall
+back to a code block, so normal replies are unaffected ("not every chat is like this").
+
+````
+```ui
+{ "type": "checklist", "props": { "title": "Build plan",
+  "items": [ { "id": "1", "text": "Create API" }, { "id": "2", "text": "Build UI" } ] } }
+```
+````
+
+Phase 1 widget types: `checklist`, `table`, `status`, `diff` (inline/split), `preview`,
+`command`, `form` (submit posts a message back to the agent). Any widget can be **pinned** (📌) to
+keep it at the top of the thread; pins persist per-session in `localStorage`. Coming later:
+`file-explorer` + Monaco `editor` (with `/fs/*` box APIs) and a live preview-control system.
+
+To make an agent actually emit these, add the protocol to its instructions (e.g. opencode
+`AGENTS.md` on the box): *"When a structured UI helps, emit a fenced `ui` block with
+`{ type, props }` using one of the supported types; otherwise reply normally."*
