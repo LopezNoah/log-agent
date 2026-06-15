@@ -4,7 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>opencode phone</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
   <link rel="stylesheet" href="/styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked-katex-extension@5/lib/index.umd.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -35,8 +40,15 @@
         </div>
       </div>
       <form id="composer" class="composer" hidden>
-        <textarea id="input" rows="1" placeholder="Message opencode…  (⌘/Ctrl+Enter to send)"></textarea>
-        <button id="send" class="btn primary send" type="submit">Send</button>
+        <div class="composer-inner">
+          <div class="composer-bar">
+            <textarea id="input" rows="1" placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
+            <div class="composer-controls">
+              <select id="agent-select" class="agent-select" title="Agent mode"></select>
+              <button id="send" class="btn primary send" type="submit">Send</button>
+            </div>
+          </div>
+        </div>
       </form>
     </main>
   </div>

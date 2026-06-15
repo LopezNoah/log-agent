@@ -9,6 +9,7 @@ const els = {
   empty: $("#empty"),
   composer: $("#composer"),
   input: $("#input"),
+  agentSelect: $("#agent-select"),
   newSession: $("#new-session"),
   machineDot: $("#machine-dot"),
   machineState: $("#machine-state"),
@@ -28,9 +29,29 @@ const state = {
   sessions: [],
   activeId: null,
   model: null, // "provider/modelID" from settings; sent with each message when set
+  agent: null, // selected primary agent ("build" | "plan" | …); sent with each message
   messages: new Map(), // messageID -> { info, parts: Map<partID, part>, order: [] }
   events: null,
 };
+
+// --------------------------------------------------------------------------- markdown + latex
+
+function setupMarkdown() {
+  if (!window.marked) return;
+  window.marked.setOptions({ gfm: true, breaks: true });
+  if (window.markedKatex) {
+    window.marked.use(window.markedKatex({ throwOnError: false, nonStandard: true }));
+  }
+}
+
+function renderMarkdown(text) {
+  if (!window.marked) return `<div class="text">${escapeHtml(text)}</div>`;
+  let html = window.marked.parse(text || "");
+  if (window.DOMPurify) {
+    html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true, mathMl: true, svg: true } });
+  }
+  return `<div class="md">${html}</div>`;
+}
 
 // --------------------------------------------------------------------------- api
 
@@ -103,11 +124,69 @@ function renderSessions() {
   for (const s of state.sessions) {
     const btn = document.createElement("button");
     btn.className = "session-item" + (s.id === state.activeId ? " active" : "");
+    btn.title = "Double-click to rename";
     btn.innerHTML = `${escapeHtml(s.title || "Untitled session")}<span class="ts">${escapeHtml(fmtTime(s.time))}</span>`;
     btn.addEventListener("click", () => selectSession(s.id));
+    btn.addEventListener("dblclick", (e) => { e.preventDefault(); startRename(s, btn); });
     els.sessionList.appendChild(btn);
   }
 }
+
+function startRename(s, btn) {
+  const input = document.createElement("input");
+  input.className = "session-rename";
+  input.value = s.title || "";
+  btn.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async (save) => {
+    if (done) return;
+    done = true;
+    if (save) {
+      const title = input.value.trim();
+      if (title && title !== s.title) {
+        try {
+          await api(`/session/${s.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title }),
+          });
+          s.title = title;
+        } catch (e) {
+          toast("Rename failed: " + e);
+        }
+      }
+    }
+    renderSessions();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(true); }
+    else if (e.key === "Escape") { commit(false); }
+  });
+  input.addEventListener("blur", () => commit(true));
+}
+
+async function loadAgents() {
+  try {
+    const agents = await api("/agent");
+    const primary = (Array.isArray(agents) ? agents : []).filter((a) => a.mode === "primary" && a.description);
+    if (!primary.length) return;
+    els.agentSelect.innerHTML = "";
+    for (const a of primary) {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = a.name.charAt(0).toUpperCase() + a.name.slice(1);
+      els.agentSelect.appendChild(opt);
+    }
+    state.agent = primary.some((a) => a.name === "build") ? "build" : primary[0].name;
+    els.agentSelect.value = state.agent;
+  } catch {
+    /* agents unavailable until the box is up; ignore */
+  }
+}
+
+els.agentSelect.addEventListener("change", () => { state.agent = els.agentSelect.value; });
 
 async function loadSessions() {
   const list = await api("/session");
@@ -224,7 +303,7 @@ function renderAssistant(m) {
     const p = m.parts.get(id);
     if (!p || p.ignored) continue;
     if (p.type === "text" || p.type === "reasoning") {
-      if (p.text) html += `<div class="text">${escapeHtml(p.text)}</div>`;
+      if (p.text) html += renderMarkdown(p.text);
     } else if (p.type === "tool") {
       html += renderTool(p);
     }
@@ -282,6 +361,7 @@ async function send() {
   renderThread(true);
 
   const payload = { parts: [{ type: "text", text }] };
+  if (state.agent) payload.agent = state.agent;
   if (state.model && state.model.includes("/")) {
     const i = state.model.indexOf("/");
     payload.model = { providerID: state.model.slice(0, i), modelID: state.model.slice(i + 1) };
@@ -400,12 +480,13 @@ els.sClear.addEventListener("click", async () => {
 els.newSession.addEventListener("click", () => newSession().catch((e) => toast(String(e))));
 
 async function boot() {
-  await loadSessions();
+  await Promise.all([loadSessions(), loadAgents()]);
   connectEvents();
   if (!state.activeId && state.sessions[0]) await selectSession(state.sessions[0].id);
 }
 
 async function init() {
+  setupMarkdown();
   await loadSettings();
   await pollMachine();
   setInterval(pollMachine, 15000);
