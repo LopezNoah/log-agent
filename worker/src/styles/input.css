@@ -40,10 +40,18 @@
   @keyframes dotpulse { 50% { opacity: 0.3; } }
 
   /* session rail */
-  .session-item { @apply block w-full text-left bg-transparent border border-transparent rounded-[10px] px-[11px] py-[9px] mb-0.5 cursor-pointer text-zinc-100 whitespace-nowrap overflow-hidden text-ellipsis; }
+  .session-item { @apply flex items-center gap-1 rounded-[10px] border border-transparent mb-0.5 pr-1; }
   .session-item:hover { @apply bg-panel2; }
   .session-item.active { @apply bg-panel2 border-line; }
-  .session-item .ts { @apply block text-muted text-xs mt-0.5; }
+  .session-open { @apply flex-1 min-w-0 text-left bg-transparent border-0 px-[11px] py-[9px] cursor-pointer text-zinc-100; }
+  .session-open .title { @apply block whitespace-nowrap overflow-hidden text-ellipsis; }
+  .session-open .ts { @apply block text-muted text-xs mt-0.5; }
+  /* row actions: revealed on hover, on the active row, or keyboard focus (so they're reachable on touch) */
+  .session-actions { @apply flex items-center gap-0.5 shrink-0 opacity-0 transition-opacity; }
+  .session-item:hover .session-actions, .session-item.active .session-actions, .session-item:focus-within .session-actions { @apply opacity-100; }
+  .session-act { @apply w-7 h-7 grid place-items-center rounded-md bg-transparent border-0 text-muted cursor-pointer text-[13px] leading-none; }
+  .session-act:hover { @apply bg-line text-zinc-100; }
+  .session-act.danger:hover { color: var(--color-bad); }
   .session-rename { @apply block w-full bg-ink border rounded-lg px-2.5 py-2 text-zinc-100 outline-none; border-color: var(--color-accent); }
 
   /* messages */

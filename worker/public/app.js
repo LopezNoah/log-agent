@@ -215,21 +215,50 @@ function fmtTime(t) {
 function renderSessions() {
   els.sessionList.innerHTML = "";
   for (const s of state.sessions) {
-    const btn = document.createElement("button");
-    btn.className = "session-item" + (s.id === state.activeId ? " active" : "");
-    btn.title = "Double-click to rename";
-    btn.innerHTML = `${escapeHtml(s.title || "Untitled session")}<span class="ts">${escapeHtml(fmtTime(s.time))}</span>`;
-    btn.addEventListener("click", () => selectSession(s.id));
-    btn.addEventListener("dblclick", (e) => { e.preventDefault(); startRename(s, btn); });
-    els.sessionList.appendChild(btn);
+    const row = document.createElement("div");
+    row.className = "session-item" + (s.id === state.activeId ? " active" : "");
+
+    const open = document.createElement("button");
+    open.className = "session-open";
+    open.innerHTML = `<span class="title">${escapeHtml(s.title || "Untitled session")}</span><span class="ts">${escapeHtml(fmtTime(s.time))}</span>`;
+    open.addEventListener("click", () => selectSession(s.id));
+    open.addEventListener("dblclick", (e) => { e.preventDefault(); startRename(s, open); });
+
+    const actions = document.createElement("div");
+    actions.className = "session-actions";
+    const rename = document.createElement("button");
+    rename.className = "session-act";
+    rename.title = "Rename";
+    rename.textContent = "✎";
+    rename.addEventListener("click", (e) => { e.stopPropagation(); startRename(s, open); });
+    const del = document.createElement("button");
+    del.className = "session-act danger";
+    del.title = "Delete";
+    del.textContent = "🗑";
+    del.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s); });
+    actions.append(rename, del);
+
+    row.append(open, actions);
+    els.sessionList.appendChild(row);
   }
 }
 
-function startRename(s, btn) {
+async function deleteSession(s) {
+  if (!confirm(`Delete "${s.title || "Untitled session"}"? This can't be undone.`)) return;
+  try {
+    await api(`/session/${s.id}`, { method: "DELETE" });
+    removeSession(s.id); // the DO also broadcasts session.deleted; removeSession is idempotent
+    toast("Session deleted");
+  } catch (e) {
+    toast("Delete failed: " + e);
+  }
+}
+
+function startRename(s, openBtn) {
   const input = document.createElement("input");
   input.className = "session-rename";
   input.value = s.title || "";
-  btn.replaceWith(input);
+  openBtn.replaceWith(input);
   input.focus();
   input.select();
   let done = false;
