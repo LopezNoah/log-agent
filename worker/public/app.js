@@ -11,6 +11,7 @@ const els = {
   scrim: $("#scrim"),
   sessionList: $("#session-list"),
   thread: $("#thread"),
+  usageTotal: $("#usage-total"),
   empty: $("#empty"),
   composer: $("#composer"),
   offlineBanner: $("#offline-banner"),
@@ -427,6 +428,7 @@ function renderThread(scroll = false) {
     els.thread.appendChild(node);
   }
 
+  renderUsageTotal();
   if (scroll || nearBottom) els.thread.scrollTop = els.thread.scrollHeight;
 }
 
@@ -449,7 +451,51 @@ function renderAssistant(m) {
   }
   if (!html && streaming) html = `<div class="text"></div>`;
   if (streaming) html += `<span class="caret"></span>`;
+  else html += renderUsage(m.info);
   return html;
+}
+
+function fmtTokens(n) {
+  if (!n) return "0";
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
+}
+
+function fmtCost(c) {
+  return "$" + (c < 0.01 ? c.toFixed(4) : c.toFixed(2));
+}
+
+// opencode reports per-message usage on the assistant message info: tokens {input,output,
+// reasoning,cache:{read,write}} and cost. Render a compact footer; show nothing if absent.
+function renderUsage(info) {
+  const t = info?.tokens || {};
+  const cost = info?.cost;
+  const bits = [];
+  if (info?.modelID) bits.push(escapeHtml(info.modelID));
+  if (t.input != null || t.output != null) bits.push(`↑ ${fmtTokens(t.input)} ↓ ${fmtTokens(t.output)}`);
+  if (t.cache?.read) bits.push(`cache ${fmtTokens(t.cache.read)}`);
+  if (typeof cost === "number" && cost > 0) bits.push(fmtCost(cost));
+  return bits.length ? `<div class="usage">${bits.join(" · ")}</div>` : "";
+}
+
+// Sum cost + tokens across the active session's completed assistant messages.
+function renderUsageTotal() {
+  let cost = 0;
+  let input = 0;
+  let output = 0;
+  for (const m of orderedMessages()) {
+    const info = m.info;
+    if (info.role !== "assistant" || !info.time?.completed) continue;
+    const t = info.tokens || {};
+    cost += typeof info.cost === "number" ? info.cost : 0;
+    input += t.input || 0;
+    output += t.output || 0;
+  }
+  const total = input + output;
+  const el = els.usageTotal;
+  if (!el) return;
+  if (!total && !cost) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = `Σ ↑ ${fmtTokens(input)} ↓ ${fmtTokens(output)}` + (cost > 0 ? ` · ${fmtCost(cost)}` : "");
 }
 
 function renderTool(p) {

@@ -35,7 +35,8 @@
       </footer>
     </aside>
 
-    <main class="flex flex-col min-w-0 min-h-0">
+    <main class="flex flex-col min-w-0 min-h-0 relative">
+      <div id="usage-total" class="usage-total" hidden></div>
       <div id="thread" class="flex-1 overflow-y-auto pt-7 pb-2 max-md:pt-16 min-h-0">
         <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-muted px-6">
           <h1 class="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
@@ -66,9 +67,11 @@
   <div id="settings-overlay" class="settings-overlay" hidden>
     <div class="settings-shell">
       <nav id="settings-nav" class="settings-nav">
-        <div class="settings-nav-title">Settings</div>
-        <div class="settings-nav-spacer"></div>
-        <button id="settings-close" class="btn btn-ghost settings-nav-close">Close</button>
+        <div class="settings-nav-header">
+          <div class="settings-nav-title">Settings</div>
+          <button id="settings-close" class="settings-close" aria-label="Close settings">✕</button>
+        </div>
+        <div id="settings-nav-items" class="settings-nav-items"></div>
       </nav>
       <div id="settings-content" class="settings-content"></div>
     </div>

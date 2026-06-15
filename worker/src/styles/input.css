@@ -60,6 +60,10 @@
   .msg.user .bubble { @apply bg-panel2 border border-line rounded-xl px-3.5 py-3 whitespace-pre-wrap break-words; }
   .msg.assistant .text { @apply whitespace-pre-wrap break-words; }
 
+  /* token usage — per-message footer + running session-total chip */
+  .usage { @apply mt-2.5 pt-2 border-t border-line text-[11.5px] text-muted; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .usage-total { @apply absolute top-2 right-3 z-10 text-[11.5px] text-muted bg-panel2/85 border border-line rounded-full px-2.5 py-1 pointer-events-none max-md:top-3 max-md:right-3; font-family: ui-monospace, "SF Mono", Menlo, monospace; backdrop-filter: blur(4px); }
+
   /* tool call disclosure */
   .tool { @apply border border-line rounded-[10px] bg-panel my-2 overflow-hidden; }
   .tool > summary { @apply cursor-pointer px-3 py-2 text-[13px] flex items-center gap-2 list-none; }
@@ -89,6 +93,9 @@
   @media (max-width: 767px) {
     .sidebar { @apply fixed inset-y-0 left-0 right-[22%] max-w-[320px] z-[38]; transform: translateX(-100%); transition: transform .2s ease; }
     .sidebar.open { transform: none; box-shadow: 0 0 60px rgb(0 0 0 / .6); }
+    /* No hover on touch — keep rename/delete always visible with bigger tap targets. */
+    .session-actions { @apply opacity-100; }
+    .session-act { @apply w-9 h-9 text-base; }
   }
 
   /* form fields (shared by login + settings) */
@@ -101,19 +108,22 @@
   .login-brand { @apply text-2xl font-semibold tracking-tight; }
   .login-error { @apply text-[13px] m-0; color: var(--color-bad); }
 
-  /* settings overlay */
-  .settings-overlay { @apply fixed inset-0 z-50 flex items-center justify-center p-0 md:p-6; background: rgb(0 0 0 / .55); }
-  .settings-shell { @apply grid w-full h-full md:h-[min(680px,92vh)] md:max-w-[920px] grid-cols-1 md:grid-cols-[220px_1fr] bg-panel md:border border-line md:rounded-2xl overflow-hidden; box-shadow: 0 24px 80px rgb(0 0 0 / .55); }
-  .settings-nav { @apply flex md:flex-col gap-0.5 p-3 bg-panel border-b md:border-b-0 md:border-r border-line overflow-x-auto md:overflow-y-auto shrink-0; }
-  .settings-nav-title { @apply hidden md:block text-xs uppercase tracking-wider text-muted px-2 pt-1 pb-2; }
+  /* settings overlay — two-column modal on desktop; full-screen page with a pill nav on mobile */
+  .settings-overlay { @apply fixed inset-0 z-50 flex items-stretch md:items-center justify-center p-0 md:p-6; background: rgb(0 0 0 / .55); }
+  .settings-shell { @apply flex flex-col md:grid w-full h-full md:h-[min(680px,92vh)] md:max-w-[920px] md:grid-cols-[230px_1fr] bg-panel md:border border-line md:rounded-2xl overflow-hidden; box-shadow: 0 24px 80px rgb(0 0 0 / .55); }
+  .settings-nav { @apply flex flex-col p-3 bg-panel border-b md:border-b-0 md:border-r border-line shrink-0 md:overflow-y-auto; }
+  .settings-nav-header { @apply flex items-center justify-between gap-2 mb-1 md:mb-2; }
+  .settings-nav-title { @apply text-lg md:text-xs font-semibold md:font-normal md:uppercase md:tracking-wider md:text-muted px-1; }
+  .settings-close { @apply w-9 h-9 grid place-items-center rounded-lg bg-transparent border border-line text-muted cursor-pointer text-base shrink-0; }
+  .settings-close:hover { @apply bg-panel2 text-zinc-100; }
+  .settings-nav-items { @apply flex flex-row md:flex-col gap-1 md:gap-0.5 overflow-x-auto md:overflow-visible -mx-1 px-1 md:mx-0 md:px-0; scrollbar-width: none; }
+  .settings-nav-items::-webkit-scrollbar { display: none; }
   .settings-nav-group { @apply hidden md:block text-[11px] uppercase tracking-wider text-muted px-2 pt-3 pb-1; }
-  .settings-nav-item { @apply text-left whitespace-nowrap bg-transparent border border-transparent rounded-lg px-3 py-2 text-[13.5px] text-zinc-200 cursor-pointer; }
+  .settings-nav-item { @apply whitespace-nowrap text-left bg-transparent border border-line md:border-transparent rounded-lg px-3 py-1.5 md:py-2 text-[13px] md:text-[13.5px] text-zinc-200 cursor-pointer shrink-0; }
   .settings-nav-item:hover { @apply bg-panel2; }
   .settings-nav-item.active { @apply bg-panel2 border-line text-zinc-100; }
   .settings-nav-item.indent { @apply md:ml-2; }
-  .settings-nav-spacer { @apply md:flex-1; }
-  .settings-nav-close { @apply ml-auto md:ml-0; }
-  .settings-content { @apply overflow-y-auto p-6 md:p-8 min-h-0; }
+  .settings-content { @apply flex-1 overflow-y-auto p-5 md:p-8 min-h-0; }
   .settings-loading { @apply text-sm; }
 
   .settings-panel { @apply max-w-[560px] flex flex-col gap-5; }

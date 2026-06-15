@@ -75,23 +75,29 @@ async function reload() {
 // ---------------------------------------------------------------- shell
 
 function buildNav() {
-  nav.querySelectorAll(".settings-nav-item, .settings-nav-group").forEach((n) => n.remove());
-  const frag = document.createDocumentFragment();
+  const items = document.getElementById("settings-nav-items");
+  items.innerHTML = "";
   for (const s of SECTIONS) {
     if (s.group) {
       const g = document.createElement("div");
       g.className = "settings-nav-group";
       g.textContent = s.label;
-      frag.appendChild(g);
+      items.appendChild(g);
       continue;
     }
     const b = document.createElement("button");
     b.className = "settings-nav-item" + (s.indent ? " indent" : "") + (s.id === active ? " active" : "");
     b.textContent = s.label;
-    b.addEventListener("click", () => { active = s.id; render(); });
-    frag.appendChild(b);
+    b.addEventListener("click", () => { active = s.id; render(); scrollNavToActive(b); });
+    items.appendChild(b);
   }
-  nav.querySelector(".settings-nav-title").after(frag);
+}
+
+// On mobile the nav is a horizontal scroller — keep the selected pill in view.
+function scrollNavToActive(btn) {
+  if (window.matchMedia("(max-width: 767px)").matches) {
+    btn.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+  }
 }
 
 export async function openSettings() {
