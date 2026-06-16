@@ -821,6 +821,66 @@ function handleExec(req, res, url) {
   return void json(res, 405, { error: "method_not_allowed" });
 }
 
+// ---------------------------------------------------------------------------
+// /relay/codex : forward a ChatGPT-subscription (codex) request to chatgpt.com from the box's
+// (non-Cloudflare) IP. chatgpt.com bot-blocks Cloudflare Workers, so the Worker's agent runtime
+// sends the call here. The codex bearer arrives as X-Codex-Auth (the box's own Basic auth is on
+// Authorization); we forward it as Authorization to chatgpt.com and stream the SSE response back.
+// Restricted to the single codex endpoint — not an open proxy.
+// ---------------------------------------------------------------------------
+const CODEX_RELAY_TARGET = "https://chatgpt.com/backend-api/codex/responses";
+
+function readRaw(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", () => resolve(Buffer.alloc(0)));
+  });
+}
+
+function hdr(req, name) {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
+async function handleCodexRelay(req, res) {
+  const codexAuth = hdr(req, "x-codex-auth");
+  if (!codexAuth) return void json(res, 400, { error: "missing_codex_auth" });
+  const body = await readRaw(req);
+  const headers = {
+    Authorization: codexAuth,
+    "Content-Type": hdr(req, "content-type") || "application/json",
+    Accept: hdr(req, "accept") || "text/event-stream",
+    originator: hdr(req, "originator") || "opencode",
+    "User-Agent": hdr(req, "user-agent") || "opencode-phone/1.0",
+  };
+  const account = hdr(req, "x-codex-account");
+  if (account) headers["ChatGPT-Account-Id"] = account;
+
+  let upstream;
+  try {
+    upstream = await fetch(CODEX_RELAY_TARGET, { method: "POST", headers, body });
+  } catch (e) {
+    return void json(res, 502, { error: "codex_relay_failed", message: String((e && e.message) || e) });
+  }
+
+  res.writeHead(upstream.status, {
+    "Content-Type": upstream.headers.get("content-type") || "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+  });
+  if (!upstream.body) return void res.end();
+  const reader = upstream.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+  } catch { /* client disconnected */ }
+  res.end();
+}
+
 const server = http.createServer((req, res) => {
   const rawUrl = req.url || "/";
   const url = parseUrl(rawUrl);
@@ -873,6 +933,13 @@ const server = http.createServer((req, res) => {
       });
     }
     return void json(res, 405, { error: "method_not_allowed" });
+  }
+
+  // Codex egress relay (Agent Architecture v2): the Worker forwards ChatGPT-subscription calls here
+  // so they leave from the box's non-Cloudflare IP (chatgpt.com bot-blocks Cloudflare Workers).
+  if (url.pathname === "/relay/codex" && req.method === "POST") {
+    handleCodexRelay(req, res);
+    return;
   }
 
   // Exec APIs (Agent Architecture v2): start/stream/status/kill commands in the workspace.

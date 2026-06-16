@@ -586,8 +586,11 @@ function onMessageUpdated(info) {
   if (belongsToActive(info)) renderThread();
 }
 
-// Optimistic local-* user bubbles are removed only when a non-local user message that actually has
-// text exists for the active session — never on the bare info-only message.updated.
+// Optimistic opencode user bubbles ("local-<ts>") are removed only when a non-local user message
+// that actually has text exists for the active session — never on the bare info-only
+// message.updated. CRUCIALLY this must NOT touch worker-brain bubbles ("local-wb-*"): those are an
+// independent render path, and a background opencode event for the active session would otherwise
+// wipe an in-flight worker-brain message mid-stream.
 function dropLocalsIfReplaced() {
   const replaced = [...state.messages.values()].some(
     (m) =>
@@ -597,7 +600,9 @@ function dropLocalsIfReplaced() {
       [...m.parts.values()].some((p) => p?.type === "text" && p.text),
   );
   if (!replaced) return;
-  for (const key of [...state.messages.keys()]) if (key.startsWith("local-")) state.messages.delete(key);
+  for (const key of [...state.messages.keys()]) {
+    if (key.startsWith("local-") && !key.startsWith("local-wb-")) state.messages.delete(key);
+  }
 }
 
 function onPartUpdated(part) {

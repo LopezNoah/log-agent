@@ -198,6 +198,11 @@ export interface CodexFetchOpts {
   // Optional originator/User-Agent overrides; sensible defaults applied otherwise.
   originator?: string;
   userAgent?: string;
+  // Egress relay: chatgpt.com bot-blocks Cloudflare Workers, so send the request to the Fly box's
+  // /relay/codex endpoint (a non-Cloudflare IP) instead, which forwards it to chatgpt.com. `url` is
+  // the box relay URL; `auth` is the box's Basic auth (FLY_UPSTREAM_AUTHORIZATION). When set, the
+  // codex bearer travels as X-Codex-Auth so it doesn't collide with the box's own Authorization.
+  relay?: { url: string; auth?: string };
 }
 
 type FetchInput = Parameters<typeof fetch>[0];
@@ -242,15 +247,27 @@ export function createCodexFetch(opts: CodexFetchOpts): typeof fetch {
 
     // Drop any stale Authorization the SDK may have attached, then set ours.
     headers.delete("authorization");
-    headers.set("Authorization", `Bearer ${tokens.access}`);
-    if (tokens.accountId) headers.set("ChatGPT-Account-Id", tokens.accountId);
     headers.set("originator", originator);
     headers.set("User-Agent", userAgent);
 
-    // Rewrite the endpoint: anything aimed at /v1/responses or /chat/completions goes to codex.
-    const url = new URL(req.url);
-    if (url.pathname.includes("/v1/responses") || url.pathname.includes("/chat/completions")) {
-      url.href = CHATGPT_CODEX_RESPONSES;
+    let target: string;
+    if (opts.relay) {
+      // Egress via the Fly box: send to its /relay/codex (Basic-authed to the box), carrying the
+      // codex bearer in X-Codex-Auth so it doesn't collide with the box's own Authorization. The
+      // box forwards to chatgpt.com from its non-Cloudflare IP and streams the SSE back.
+      target = opts.relay.url;
+      if (opts.relay.auth) headers.set("Authorization", opts.relay.auth);
+      headers.set("X-Codex-Auth", `Bearer ${tokens.access}`);
+      if (tokens.accountId) headers.set("X-Codex-Account", tokens.accountId);
+    } else {
+      headers.set("Authorization", `Bearer ${tokens.access}`);
+      if (tokens.accountId) headers.set("ChatGPT-Account-Id", tokens.accountId);
+      // Rewrite the endpoint: anything aimed at the responses/chat path goes to codex.
+      const url = new URL(req.url);
+      if (url.pathname.includes("/v1/responses") || url.pathname.includes("/chat/completions") || url.pathname.includes("/codex/responses")) {
+        url.href = CHATGPT_CODEX_RESPONSES;
+      }
+      target = url.toString();
     }
 
     // Reshape the Responses body for the picky codex backend (drop maxOutputTokens, force
@@ -265,7 +282,7 @@ export function createCodexFetch(opts: CodexFetchOpts): typeof fetch {
       }
     }
 
-    return fetch(url.toString(), {
+    return fetch(target, {
       method: req.method,
       headers,
       body,

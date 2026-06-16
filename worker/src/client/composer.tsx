@@ -124,9 +124,9 @@ function Composer(handle: Handle<ComposerProps>) {
             ]}
           />
 
-          <div className="flex items-center gap-2 mt-2">
+          <div className="flex flex-wrap items-center gap-2 mt-2 min-w-0">
             <select
-              className="agent-select brain-select"
+              className="agent-select brain-select shrink-0"
               title="Which brain handles your message — opencode (the box) or the Worker-side agent"
               value={p.brain}
               mix={on("change", (event) => p.onBrainChange(event.currentTarget.value as Brain))}
@@ -136,7 +136,7 @@ function Composer(handle: Handle<ComposerProps>) {
             </select>
             {p.brain === "worker" && (
               <select
-                className="agent-select"
+                className="agent-select shrink-0 max-w-[10rem]"
                 title="Worker-brain model"
                 value={p.workerModel}
                 mix={on("change", (event) => p.onWorkerModelChange(event.currentTarget.value))}
@@ -146,6 +146,8 @@ function Composer(handle: Handle<ComposerProps>) {
                 ))}
               </select>
             )}
+            {/* Agent mode is an opencode concept — hide it for the worker brain to declutter the row. */}
+            {p.brain !== "worker" && (
             <select
               className="agent-select"
               title="Agent mode"
@@ -158,6 +160,7 @@ function Composer(handle: Handle<ComposerProps>) {
                 </option>
               ))}
             </select>
+            )}
             <label
               className="auto-toggle"
               title="Auto-approve every tool action in this session (no prompts) — for unattended runs"

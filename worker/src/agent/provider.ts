@@ -74,9 +74,15 @@ export async function resolveModel(env: Env, modelOverride?: string): Promise<{ 
 // (which the fetch wrapper then overwrites); a non-empty value keeps the SDK from throwing.
 async function chatGptModel(env: Env, modelId: string): Promise<LanguageModel> {
   const initial = await readChatGptBundle(env);
+  // chatgpt.com bot-blocks Cloudflare Workers, so egress the codex call through the Fly box
+  // (non-Cloudflare IP) when we know the box URL. Falls back to a direct call otherwise.
+  const relay = env.FLY_BASE_URL
+    ? { url: new URL("/relay/codex", env.FLY_BASE_URL).toString(), auth: env.FLY_UPSTREAM_AUTHORIZATION }
+    : undefined;
   const codexFetch = createCodexFetch({
     getTokens: async (): Promise<ChatGptTokens> => readChatGptBundle(env),
     saveTokens: async (tokens: ChatGptTokens) => updateChatGptBundle(env, tokens),
+    relay,
   });
   const provider = createOpenAI({
     baseURL: CHATGPT_CODEX_BASE,
