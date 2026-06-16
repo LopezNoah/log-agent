@@ -5,9 +5,9 @@
 
 import { confirmAction } from "./utils.js";
 
-const overlay = document.getElementById("settings-overlay");
-const content = document.getElementById("settings-content");
-const nav = document.getElementById("settings-nav");
+// The settings overlay is rendered by the Remix <App> component, so it doesn't exist at module
+// load — resolve these lazily on first openSettings() (every other usage flows through that).
+let overlay, content, nav;
 
 let connectors = []; // cached list from the API
 let envMeta = {}; // deployment-level info (e.g. whether a Fly env token is configured)
@@ -104,6 +104,10 @@ function scrollNavToActive(btn) {
 }
 
 export async function openSettings() {
+  overlay ??= document.getElementById("settings-overlay");
+  content ??= document.getElementById("settings-content");
+  nav ??= document.getElementById("settings-nav");
+  wireSettings();
   overlay.hidden = false;
   active = "llm";
   buildNav();
@@ -522,6 +526,13 @@ async function renderSystemPrompt() {
 
 // ---------------------------------------------------------------- wiring
 
-document.getElementById("settings-close").addEventListener("click", closeSettings);
-overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSettings(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !overlay.hidden) closeSettings(); });
+// The overlay is rendered by the Remix <App>, so it doesn't exist at module load. Wire its close
+// affordances once, the first time settings opens (overlay/content/nav are assigned by then).
+let wired = false;
+function wireSettings() {
+  if (wired) return;
+  wired = true;
+  document.getElementById("settings-close").addEventListener("click", closeSettings);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSettings(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !overlay.hidden) closeSettings(); });
+}

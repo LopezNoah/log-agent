@@ -13,6 +13,12 @@ import { closeSidebar, setupMobile } from "./mobile.js";
 import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
 import { mountSessionList } from "../client/session-list.tsx";
 import { mountComposer } from "../client/composer.tsx";
+import { mountApp } from "../client/app.tsx";
+
+// Render the Remix layout into #root BEFORE anything else: every top-level els.* access below and
+// the per-region renderers depend on these nodes existing. dom.js resolves els lazily, so this is
+// the single point that must run first.
+mountApp(document.getElementById("root"));
 
 // --------------------------------------------------------------------------- machine
 
