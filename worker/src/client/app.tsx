@@ -13,7 +13,7 @@ function App(_handle: Handle) {
       <div id="app" className="grid h-dvh grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)_320px]">
         <button id="menu-toggle" className="menu-toggle md:hidden" aria-label="Toggle sessions">☰</button>
         <button id="files-toggle" className="files-toggle md:hidden" aria-label="Toggle files">Files</button>
-        <div id="scrim" className="fixed inset-0 z-[35] bg-black/50 md:hidden" hidden={true}></div>
+        <div id="scrim" className="fixed inset-0 z-[35] bg-black/50 backdrop-blur-sm md:hidden" hidden={true}></div>
 
         <aside id="sidebar" className="sidebar flex flex-col min-h-0 bg-panel border-r border-line">
           <header className="flex items-center justify-between px-4 py-3 border-b border-line">

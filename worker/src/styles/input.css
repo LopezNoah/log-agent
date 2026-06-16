@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
-/* Scan the SPA for utility classes: the Astro page shells + the client modules. */
+/* Scan the SPA for utility classes: the Astro page shells + layout, the vanilla client modules,
+   and the Remix (remix/ui) components — the whole layout + UI now lives in src/client/*.tsx and
+   src/layouts, so these must be scanned explicitly (don't rely on Tailwind's auto-detection). */
 @source "../pages/**/*.astro";
+@source "../layouts/**/*.astro";
 @source "../app/**/*.js";
+@source "../client/**/*.tsx";
 
 /* Custom palette exposed as Tailwind color utilities (bg-ink, border-line, text-accent, …). */
 @theme {

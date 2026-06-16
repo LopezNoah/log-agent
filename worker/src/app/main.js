@@ -553,15 +553,44 @@ function upsertPart(entry, part) {
   entry.parts.set(id, { ...(entry.parts.get(id) || {}), ...part });
 }
 
+// Apply an authoritative message snapshot from the DO without blanking the thread: prune only real
+// (non-local) messages that are gone upstream, while keeping optimistic local-* bubbles and any
+// assistant still streaming (not yet completed) that a slightly-stale snapshot might omit.
+// ingestMessage upserts (merges parts), so a snapshot never drops parts the client already streamed.
+function applyMessagesSnapshot(items) {
+  const ids = new Set(items.map((it) => (it?.info || it)?.id).filter(Boolean));
+  for (const [id, entry] of [...state.messages.entries()]) {
+    if (id.startsWith("local-")) continue;
+    const streaming = entry.info.role === "assistant" && !entry.info.time?.completed;
+    if (!ids.has(id) && !streaming) state.messages.delete(id);
+  }
+  for (const item of items) ingestMessage(item);
+}
+
 function onMessageUpdated(info) {
   if (!info?.id) return;
-  // Drop optimistic local bubbles once the real user message lands.
-  if (info.role === "user") {
-    for (const key of [...state.messages.keys()]) if (key.startsWith("local-")) state.messages.delete(key);
-  }
   ingestMessage({ info });
+  // Drop the optimistic local bubble only once a REAL user message with its text exists for this
+  // session. The real user message.updated arrives info-only (its text part streams in via
+  // message.part.updated a beat later), so deleting the local eagerly blanks the just-sent prompt
+  // until that part lands — exactly when the response starts coming in.
+  dropLocalsIfReplaced();
   if (info.role === "assistant" && info.time?.completed) scheduleFilesRefresh(250);
   if (belongsToActive(info)) renderThread();
+}
+
+// Optimistic local-* user bubbles are removed only when a non-local user message that actually has
+// text exists for the active session — never on the bare info-only message.updated.
+function dropLocalsIfReplaced() {
+  const replaced = [...state.messages.values()].some(
+    (m) =>
+      m.info.role === "user" &&
+      !m.info.id?.startsWith("local-") &&
+      m.info.sessionID === state.activeId &&
+      [...m.parts.values()].some((p) => p?.type === "text" && p.text),
+  );
+  if (!replaced) return;
+  for (const key of [...state.messages.keys()]) if (key.startsWith("local-")) state.messages.delete(key);
 }
 
 function onPartUpdated(part) {
@@ -572,6 +601,7 @@ function onPartUpdated(part) {
     state.messages.set(part.messageID, entry);
   }
   upsertPart(entry, part);
+  dropLocalsIfReplaced(); // the real user text part just landed → safe to drop the optimistic bubble
   if (part.type === "tool") scheduleFilesRefresh(part.state?.status === "completed" || part.status === "completed" ? 250 : 900);
   if (belongsToActive(entry.info) || part.sessionID === state.activeId) renderThread();
 }
@@ -1309,8 +1339,7 @@ function onSyncMessage(msg) {
     }
   } else if (msg.type === "messages") {
     if (msg.sessionID === state.activeId) {
-      state.messages.clear();
-      for (const item of msg.messages || []) ingestMessage(item);
+      applyMessagesSnapshot(msg.messages || []);
       reconcileBusy(msg.sessionID); // self-heal Stop/Send if we loaded mid-run
       renderThread(true);
       renderSessionBar();
