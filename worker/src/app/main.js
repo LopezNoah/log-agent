@@ -11,6 +11,7 @@ import { api, ensureAuthed, fsApi, getMachine, loadDefaultModel } from "./api.js
 import { setupMarkdown, renderMarkdown } from "./markdown.js";
 import { closeSidebar, setupMobile } from "./mobile.js";
 import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
+import { mountSessionList } from "../client/session-list.tsx";
 
 // --------------------------------------------------------------------------- machine
 
@@ -375,34 +376,34 @@ function fmtTime(t) {
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+// The session rail is a Remix (remix/ui) component mounted into #session-list (see init()).
+// renderSessions() stays the single re-render seam the rest of the app calls — it now just feeds
+// fresh props to the mounted root instead of rebuilding the DOM by hand.
+let updateSessionList = null;
 function renderSessions() {
-  els.sessionList.innerHTML = "";
-  for (const s of state.sessions) {
-    const row = document.createElement("div");
-    row.className = "session-item" + (s.id === state.activeId ? " active" : "");
+  updateSessionList?.({
+    sessions: state.sessions,
+    activeId: state.activeId,
+    fmtTime,
+    onSelect: selectSession,
+    onRename: renameSession,
+    onDelete: deleteSession,
+  });
+}
 
-    const open = document.createElement("button");
-    open.className = "session-open";
-    open.innerHTML = `<span class="title">${escapeHtml(s.title || "Untitled session")}</span><span class="ts">${escapeHtml(fmtTime(s.time))}</span>`;
-    open.addEventListener("click", () => selectSession(s.id));
-    open.addEventListener("dblclick", (e) => { e.preventDefault(); startRename(s, open); });
-
-    const actions = document.createElement("div");
-    actions.className = "session-actions";
-    const rename = document.createElement("button");
-    rename.className = "session-act";
-    rename.title = "Rename";
-    rename.textContent = "✎";
-    rename.addEventListener("click", (e) => { e.stopPropagation(); startRename(s, open); });
-    const del = document.createElement("button");
-    del.className = "session-act danger";
-    del.title = "Delete";
-    del.textContent = "🗑";
-    del.addEventListener("click", (e) => { e.stopPropagation(); deleteSession(s, del); });
-    actions.append(rename, del);
-
-    row.append(open, actions);
-    els.sessionList.appendChild(row);
+async function renameSession(s, title) {
+  const next = String(title || "").trim();
+  if (!next || next === s.title) return;
+  try {
+    await api(`/session/${s.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: next }),
+    });
+    s.title = next;
+    renderSessions();
+  } catch (e) {
+    toast("Rename failed: " + e);
   }
 }
 
@@ -419,41 +420,6 @@ async function deleteSession(s, anchor) {
   } catch (e) {
     toast("Delete failed: " + e);
   }
-}
-
-function startRename(s, openBtn) {
-  const input = document.createElement("input");
-  input.className = "session-rename";
-  input.value = s.title || "";
-  openBtn.replaceWith(input);
-  input.focus();
-  input.select();
-  let done = false;
-  const commit = async (save) => {
-    if (done) return;
-    done = true;
-    if (save) {
-      const title = input.value.trim();
-      if (title && title !== s.title) {
-        try {
-          await api(`/session/${s.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title }),
-          });
-          s.title = title;
-        } catch (e) {
-          toast("Rename failed: " + e);
-        }
-      }
-    }
-    renderSessions();
-  };
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); commit(true); }
-    else if (e.key === "Escape") { commit(false); }
-  });
-  input.addEventListener("blur", () => commit(true));
 }
 
 async function loadAgents() {
@@ -528,14 +494,14 @@ function selectSession(id, mode = "push") {
   else if (mode === "replace") history.replaceState({ session: id }, "", sessionHref(id));
 }
 
-// URL routing: each session lives at /s/<id> (the Worker's SPA fallback serves index.html there,
-// so deep-links and reloads land on the right session).
+// URL routing: each session lives at /sessions/<id>. The Astro route src/pages/sessions/[id].astro
+// serves the app shell there, so deep-links and reloads land on the right session.
 function sessionFromUrl() {
-  const m = location.pathname.match(/^\/s\/(.+)$/);
+  const m = location.pathname.match(/^\/sessions\/(.+)$/);
   return m ? decodeURIComponent(m[1]) : null;
 }
 function sessionHref(id) {
-  return id ? "/s/" + encodeURIComponent(id) : "/";
+  return id ? "/sessions/" + encodeURIComponent(id) : "/";
 }
 window.addEventListener("popstate", () => {
   const id = sessionFromUrl();
@@ -1304,7 +1270,7 @@ function onSyncMessage(msg) {
   if (msg.type === "snapshot" || msg.type === "sessions") {
     setSessions(msg.sessions || []);
     if (!state.activeId) {
-      // Honor a /s/<id> deep-link if present; otherwise open the most recent session.
+      // Honor a /sessions/<id> deep-link if present; otherwise open the most recent session.
       const target = sessionFromUrl() || state.sessions[0]?.id;
       if (target) selectSession(target, "replace");
     }
@@ -1366,7 +1332,7 @@ function removeSession(id) {
     state.activeId = null;
     els.composer.hidden = true;
     els.empty.style.display = "";
-    history.replaceState({}, "", "/"); // drop /s/<id> now that nothing is open
+    history.replaceState({}, "", "/"); // drop /sessions/<id> now that nothing is open
     renderSessionBar();
   }
   renderSessions();
@@ -1383,6 +1349,7 @@ window.addEventListener("connectors-changed", () => { loadDefaultModel(); });
 els.newSession.addEventListener("click", () => newSession().catch((e) => toast(String(e))));
 
 async function init() {
+  updateSessionList = mountSessionList(els.sessionList); // Remix-rendered session rail
   setupMobile();
   setupMarkdown();
   setupGithubProject();

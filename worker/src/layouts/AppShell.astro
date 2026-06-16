@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>opencode phone</title>
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script is:inline defer src="/vendor/marked.min.js"></script>
+  <script is:inline defer src="/vendor/katex/katex.min.js"></script>
+  <script is:inline defer src="/vendor/marked-katex.umd.js"></script>
+  <script is:inline defer src="/vendor/purify.min.js"></script>
+</head>
+<body class="bg-ink text-zinc-100 antialiased">
+  <div id="app" class="grid h-dvh grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)_320px]">
+    <button id="menu-toggle" class="menu-toggle md:hidden" aria-label="Toggle sessions">☰</button>
+    <button id="files-toggle" class="files-toggle md:hidden" aria-label="Toggle files">Files</button>
+    <div id="scrim" class="fixed inset-0 z-[35] bg-black/50 md:hidden" hidden></div>
+
+    <aside id="sidebar" class="sidebar flex flex-col min-h-0 bg-panel border-r border-line">
+      <header class="flex items-center justify-between px-4 py-3 border-b border-line">
+        <div class="font-semibold tracking-tight">opencode<span class="text-muted ml-1 font-medium">phone</span></div>
+        <button id="new-session" class="btn btn-primary h-9 w-9 p-0 text-lg" title="New session">＋</button>
+      </header>
+      <div id="session-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+      <footer class="border-t border-line px-3.5 py-3">
+        <div class="flex items-center gap-2 text-[13px] text-muted mb-2.5">
+          <span id="machine-dot" class="dot"></span>
+          <span id="machine-state">…</span>
+        </div>
+        <div class="flex gap-2">
+          <button id="machine-toggle" class="btn btn-ghost flex-1">Start</button>
+          <a class="btn btn-ghost flex-1 text-center" href="/terminal/" target="_blank" rel="noopener">Terminal ↗</a>
+        </div>
+        <button id="open-github-project" class="btn btn-primary w-full mt-2">New GitHub repo</button>
+        <button id="open-settings" class="btn btn-ghost w-full mt-2">⚙ Settings</button>
+      </footer>
+    </aside>
+
+    <main class="flex flex-col min-w-0 min-h-0 relative">
+      <div id="usage-total" class="usage-total" hidden></div>
+      <div id="thread" class="flex-1 overflow-y-auto pt-7 pb-2 max-md:pt-16 min-h-0">
+        <div id="thread-content" class="min-h-full">
+          <div id="empty" class="h-full flex flex-col items-center justify-center text-center text-muted px-6">
+            <h1 class="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
+            <p>A cloud computer for your agents. Pick a session or start a new one.</p>
+          </div>
+        </div>
+      </div>
+
+      <button id="jump-bottom" class="jump-bottom" type="button" hidden>↓ Latest</button>
+      <div id="thread-nav" class="thread-nav" hidden aria-label="Jump to prompt"></div>
+
+      <div id="offline-banner" class="offline-banner" hidden></div>
+
+      <form id="composer" class="composer" autocomplete="off" hidden>
+        <div class="mx-auto w-full max-w-3xl">
+          <div id="revert-banner" class="revert-banner" hidden></div>
+          <div class="composer-bar">
+            <div class="composer-tools">
+              <button id="act-undo" class="msg-act" type="button" title="Undo the last turn (revert)">↶ Undo</button>
+              <button id="act-redo" class="msg-act" type="button" title="Redo (unrevert)" hidden>↷ Redo</button>
+              <button id="act-compact" class="msg-act" type="button" title="Compact the conversation (summarize to free context)">⊟ Compact</button>
+              <button id="act-fork" class="msg-act" type="button" title="Fork this session into a new one">⑂ Fork</button>
+            </div>
+            <textarea id="input" name="prompt" rows="1" class="w-full bg-transparent outline-none resize-none max-h-56 py-0.5"
+              autocomplete="off" autocapitalize="sentences" autocorrect="on" spellcheck="true"
+              data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"
+              placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
+            <div class="flex items-center gap-2 mt-2">
+              <select id="agent-select" class="agent-select" title="Agent mode"></select>
+              <label class="auto-toggle" title="Auto-approve every tool action in this session (no prompts) — for unattended runs">
+                <input type="checkbox" id="auto-approve"> ⚡ Auto-approve
+              </label>
+              <button id="send" class="btn btn-primary ml-auto" type="submit">Send</button>
+              <button id="stop" class="btn btn-stop ml-auto" type="button" hidden title="Stop generating (Esc)">■ Stop</button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </main>
+
+    <aside id="files-pane" class="files-pane flex flex-col min-h-0 bg-panel border-l border-line">
+      <header class="files-head">
+        <div>
+          <div class="font-semibold tracking-tight">Files</div>
+          <div id="files-root" class="files-root">/workspace</div>
+        </div>
+        <div class="files-actions">
+          <button id="files-refresh" class="widget-act" title="Refresh files">↻</button>
+          <button id="files-close" class="widget-act md:hidden" title="Close files">✕</button>
+        </div>
+      </header>
+      <div class="files-toolbar">
+        <button id="files-new-file" class="btn btn-ghost">New file</button>
+        <button id="files-new-folder" class="btn btn-ghost">New folder</button>
+        <button id="file-rename" class="btn btn-ghost">Rename</button>
+        <button id="file-delete" class="btn btn-ghost danger">Delete</button>
+      </div>
+      <div id="files-status" class="files-status">Start the machine to browse files.</div>
+      <div id="files-tree" class="files-tree" aria-label="Workspace files"></div>
+      <section id="file-editor" class="file-editor" hidden>
+        <div class="file-editor-head">
+          <div id="file-editor-path" class="file-editor-path"></div>
+        </div>
+        <textarea id="file-editor-content" class="file-editor-content" spellcheck="false"></textarea>
+        <div class="file-editor-actions">
+          <button id="file-save" class="btn btn-primary">Save</button>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <div id="settings-overlay" class="settings-overlay" hidden>
+    <div class="settings-shell">
+      <nav id="settings-nav" class="settings-nav">
+        <div class="settings-nav-header">
+          <div class="settings-nav-title">Settings</div>
+          <button id="settings-close" class="settings-close" aria-label="Close settings">✕</button>
+        </div>
+        <div id="settings-nav-items" class="settings-nav-items"></div>
+      </nav>
+      <div id="settings-content" class="settings-content"></div>
+    </div>
+  </div>
+
+  <div id="github-project-overlay" class="github-project-overlay" hidden>
+    <section class="github-project-shell" aria-labelledby="github-project-title">
+      <header class="github-project-head">
+        <div>
+          <p class="github-project-eyebrow">Worker-owned GitHub</p>
+          <h2 id="github-project-title">Create a new repo with the cloud agent</h2>
+          <p>Draft the MVP flow where Fly builds the project and the Worker creates the GitHub repo and initial commit.</p>
+        </div>
+        <button id="github-project-close" class="settings-close" aria-label="Close new repo dialog">✕</button>
+      </header>
+
+      <form id="github-project-form" class="github-project-form">
+        <div class="github-project-grid">
+          <label class="settings-field">
+            <span>Owner</span>
+            <input id="github-project-owner" class="field" autocomplete="off" placeholder="octocat or my-org" required>
+          </label>
+          <label class="settings-field">
+            <span>Repository name</span>
+            <input id="github-project-name" class="field" autocomplete="off" placeholder="agent-built-app" required>
+          </label>
+        </div>
+
+        <label class="settings-field">
+          <span>Description</span>
+          <input id="github-project-description" class="field" placeholder="Short description for GitHub">
+        </label>
+
+        <div class="github-project-grid">
+          <label class="settings-field">
+            <span>Visibility</span>
+            <select id="github-project-visibility" class="field">
+              <option value="private">Private</option>
+              <option value="public">Public</option>
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>Default branch</span>
+            <input id="github-project-branch" class="field" value="main" autocomplete="off" required>
+          </label>
+        </div>
+
+        <label class="settings-field">
+          <span>Project brief</span>
+          <textarea id="github-project-prompt" class="field github-project-prompt" rows="6" placeholder="Describe the app, stack, constraints, and what should be in the initial commit." required></textarea>
+        </label>
+
+        <label class="auto-toggle github-project-check" title="Ask the runner to execute detected install/build/test commands before packaging the artifact.">
+          <input id="github-project-run-tests" type="checkbox" checked> Run detected checks before upload
+        </label>
+
+        <div class="github-project-actions">
+          <button class="btn btn-ghost" type="button" id="github-project-reset">Reset</button>
+          <button class="btn btn-primary" type="submit">Draft task</button>
+        </div>
+      </form>
+
+      <aside class="github-project-preview" aria-live="polite">
+        <h3>Planned orchestration</h3>
+        <div id="github-project-steps" class="github-project-steps"></div>
+        <div id="github-project-payload" class="github-project-payload" hidden></div>
+      </aside>
+    </section>
+  </div>
+
+  <script is:inline src="/assets/app.js" type="module"></script>
+</body>
+</html>

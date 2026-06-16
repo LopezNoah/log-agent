@@ -1,0 +1,8 @@
+---
+// Per-session deep link: /sessions/:id. Renders the same SPA shell so a refreshed or shared
+// session URL lands on the app; the client reads the id from location.pathname and opens it.
+// SSR (output: 'server') means any id works without getStaticPaths. Auth still runs in the Hono
+// worker (requireSession) before this renders.
+import AppShell from "../../layouts/AppShell.astro";
+---
+<AppShell />
