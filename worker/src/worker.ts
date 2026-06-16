@@ -54,6 +54,8 @@ app.all("/opencode", proxy);
 app.all("/opencode/*", proxy);
 app.all("/fs", proxy);
 app.all("/fs/*", proxy);
+app.all("/exec", proxy);
+app.all("/exec/*", proxy);
 app.all("/preview", proxy);
 app.all("/preview/*", proxy);
 app.all("/terminal", proxy);

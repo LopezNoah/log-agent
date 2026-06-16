@@ -690,6 +690,137 @@ function proxyHttp(req, res, { upstreamHost, upstreamPort, path, extraHeaders = 
   req.pipe(upstream);
 }
 
+// ---------------------------------------------------------------------------
+// /exec : structured run service (Agent Architecture v2). Start a command in a
+// detached process group, stream stdout/stderr over SSE, report status, and
+// kill the whole tree (SIGTERM -> 5s -> SIGKILL). The Worker's agent tools call
+// these; the Worker forwards the SSE straight to the browser.
+// ---------------------------------------------------------------------------
+const runs = new Map(); // id -> run
+let runSeq = 0;
+const RUN_RETENTION_MS = 5 * 60_000; // keep finished runs briefly for late status/stream
+const MAX_BUFFERED_EVENTS = 4000; // cap per-run replay buffer
+
+function makeRunId() {
+  runSeq += 1;
+  return `run_${Date.now().toString(36)}_${runSeq}`;
+}
+
+function emit(run, event, data) {
+  run.events.push({ event, data });
+  if (run.events.length > MAX_BUFFERED_EVENTS) run.events.shift();
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of run.subscribers) { try { res.write(payload); } catch { /* dropped */ } }
+}
+
+function finishRun(run, code, signal) {
+  if (run.endedMs) return; // once
+  run.endedMs = Date.now();
+  run.exitCode = code;
+  run.signal = signal || null;
+  if (run.timeoutTimer) { clearTimeout(run.timeoutTimer); run.timeoutTimer = null; }
+  if (run.killTimer) { clearTimeout(run.killTimer); run.killTimer = null; }
+  emit(run, "exit", { exitCode: code, signal: signal || null, status: run.status });
+  for (const res of run.subscribers) { try { res.end(); } catch { /* dropped */ } }
+  run.subscribers.clear();
+  run.cleanupTimer = setTimeout(() => runs.delete(run.id), RUN_RETENTION_MS);
+}
+
+function killRun(run) {
+  if (!run || run.endedMs || !run.child) return;
+  run.status = "killed";
+  const pid = run.child.pid;
+  // SIGTERM the process group (negative pid), then SIGKILL the tree after 5s if still alive.
+  try { process.kill(-pid, "SIGTERM"); } catch { try { run.child.kill("SIGTERM"); } catch { /* gone */ } }
+  run.killTimer = setTimeout(() => {
+    try { process.kill(-pid, "SIGKILL"); } catch { try { run.child.kill("SIGKILL"); } catch { /* gone */ } }
+  }, 5000);
+}
+
+function execStart(body) {
+  const command = typeof body.command === "string" ? body.command.trim() : "";
+  if (!command) throw Object.assign(new Error("missing_command"), { status: 400 });
+  const cwdRel = normalizeRelPath(body.cwd || "");
+  const cwd = path.resolve(FS_ROOT, cwdRel);
+  ensureInsideRoot(cwd);
+  if (!fs.existsSync(cwd) || !fs.lstatSync(cwd).isDirectory()) {
+    throw Object.assign(new Error("cwd_not_directory"), { status: 400 });
+  }
+  const timeoutMs = Number(body.timeoutMs) > 0 ? Math.min(Number(body.timeoutMs), 30 * 60_000) : 0;
+
+  const id = makeRunId();
+  const child = spawn(command, {
+    cwd,
+    detached: true, // own process group → SIGTERM/SIGKILL the whole tree on kill
+    shell: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, CI: "1", BROWSER: "none" },
+  });
+  const run = {
+    id, command, cwdRel,
+    status: "running", // running | exited | killed | error
+    exitCode: null, signal: null,
+    startedAt: new Date().toISOString(), startedMs: Date.now(), endedMs: null,
+    events: [], subscribers: new Set(), child,
+    killTimer: null, timeoutTimer: null, cleanupTimer: null,
+  };
+  runs.set(id, run);
+
+  child.stdout.on("data", (c) => emit(run, "stdout", { text: c.toString("utf8") }));
+  child.stderr.on("data", (c) => emit(run, "stderr", { text: c.toString("utf8") }));
+  child.on("error", (err) => { run.status = "error"; emit(run, "stderr", { text: `spawn error: ${err.message}` }); finishRun(run, null, null); });
+  child.on("exit", (code, signal) => { if (run.status === "running") run.status = signal ? "killed" : "exited"; finishRun(run, code, signal); });
+  child.unref();
+
+  if (timeoutMs) {
+    run.timeoutTimer = setTimeout(() => { emit(run, "stderr", { text: `\n[timed out after ${timeoutMs}ms]\n` }); killRun(run); }, timeoutMs);
+  }
+  return run;
+}
+
+function runStatus(run) {
+  return {
+    id: run.id, status: run.status, exitCode: run.exitCode, signal: run.signal,
+    startedAt: run.startedAt, runtimeMs: (run.endedMs || Date.now()) - run.startedMs,
+  };
+}
+
+function handleExec(req, res, url) {
+  if (url.pathname === "/exec/start" && req.method === "POST") {
+    return void readBody(req).then((body) => {
+      if (!body) return json(res, 400, { error: "invalid_body" });
+      try { const run = execStart(body); json(res, 200, { id: run.id, status: run.status }); }
+      catch (e) { json(res, e.status || 500, { error: e.message || "exec_failed" }); }
+    });
+  }
+
+  const m = url.pathname.match(/^\/exec\/([^/]+)(\/events|\/kill)?$/);
+  if (!m) return void json(res, 404, { error: "not_found" });
+  const run = runs.get(decodeURIComponent(m[1]));
+  if (!run) return void json(res, 404, { error: "run_not_found" });
+  const sub = m[2];
+
+  if (sub === "/events" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(": connected\n\n");
+    for (const f of run.events) res.write(`event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n\n`);
+    if (run.endedMs) return void res.end(); // already finished — replay buffer included the exit event
+    run.subscribers.add(res);
+    const drop = () => run.subscribers.delete(res);
+    req.on("close", drop);
+    res.on("close", drop);
+    return;
+  }
+  if (sub === "/kill" && req.method === "POST") { killRun(run); return void json(res, 200, { ok: true }); }
+  if (!sub && req.method === "GET") return void json(res, 200, runStatus(run));
+  return void json(res, 405, { error: "method_not_allowed" });
+}
+
 const server = http.createServer((req, res) => {
   const rawUrl = req.url || "/";
   const url = parseUrl(rawUrl);
@@ -742,6 +873,12 @@ const server = http.createServer((req, res) => {
       });
     }
     return void json(res, 405, { error: "method_not_allowed" });
+  }
+
+  // Exec APIs (Agent Architecture v2): start/stream/status/kill commands in the workspace.
+  if (url.pathname === "/exec" || url.pathname.startsWith("/exec/")) {
+    handleExec(req, res, url);
+    return;
   }
 
   // Filesystem APIs: expose only /home/dev/workspace through relative paths.
@@ -839,11 +976,17 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 function startTtyd() {
+  const bin = process.env.TTYD_BIN || "/usr/local/bin/ttyd";
   const child = spawn(
-    "/usr/local/bin/ttyd",
+    bin,
     ["-i", ttydHost, "-p", String(ttydPort), "-W", "-b", "/terminal", "/home/dev/bin/attach-session"],
     { stdio: "inherit", env: process.env },
   );
+  // Don't let a missing/failing ttyd crash the whole control plane (fs/exec/preview); just retry.
+  child.on("error", (e) => {
+    console.error(`ttyd spawn failed (${bin}): ${e.message}`);
+    setTimeout(startTtyd, 5000);
+  });
   child.on("exit", () => {
     setTimeout(startTtyd, 2000);
   });
