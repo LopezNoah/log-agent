@@ -16,13 +16,14 @@ export interface AgentChatInput {
   prompt?: string;
   messages?: ModelMessage[];
   system?: string;
+  model?: string; // optional per-request model id (e.g. the worker-brain model picker)
 }
 
 // The agent loop. streamText + stopWhen(stepCountIs) IS the "keep going until finished" mechanism:
 // the model calls tools, the SDK executes them and feeds results back, and it repeats until the
 // model stops calling tools (done) or hits the step cap. modelOverride is for tests (mock model).
 export async function runAgentChat(env: Env, input: AgentChatInput, modelOverride?: LanguageModel) {
-  const model = modelOverride ?? (await resolveModel(env)).model;
+  const model = modelOverride ?? (await resolveModel(env, input.model)).model;
   return streamText({
     model,
     system: input.system || DEFAULT_SYSTEM,

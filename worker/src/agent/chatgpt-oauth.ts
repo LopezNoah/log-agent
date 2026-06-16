@@ -253,18 +253,15 @@ export function createCodexFetch(opts: CodexFetchOpts): typeof fetch {
       url.href = CHATGPT_CODEX_RESPONSES;
     }
 
-    // Strip maxOutputTokens from the body (the picky codex backend 400s on it).
+    // Reshape the Responses body for the picky codex backend (drop maxOutputTokens, force
+    // store:false, include encrypted reasoning for stateless continuity).
     let body: BodyInit | null | undefined = req.body;
     if (req.method && req.method.toUpperCase() !== "GET" && req.method.toUpperCase() !== "HEAD") {
       const raw = await req.clone().text();
       if (raw) {
-        const stripped = stripMaxOutputTokens(raw);
-        if (stripped !== null) {
-          body = stripped;
-          headers.set("Content-Type", "application/json");
-        } else {
-          body = raw;
-        }
+        const transformed = transformCodexBody(raw);
+        body = transformed ?? raw;
+        if (transformed) headers.set("Content-Type", "application/json");
       }
     }
 
@@ -279,9 +276,11 @@ export function createCodexFetch(opts: CodexFetchOpts): typeof fetch {
   return wrapped as unknown as typeof fetch;
 }
 
-// Remove maxOutputTokens / max_output_tokens from a JSON request body. Returns the re-serialized
-// JSON string, or null if the body wasn't JSON / nothing changed (caller keeps the raw body).
-function stripMaxOutputTokens(raw: string): string | null {
+// Reshape a Responses-API request body for the codex backend. Returns the re-serialized JSON, or
+// null if the body wasn't JSON (caller keeps the raw body). The codex backend rejects
+// maxOutputTokens, and for a stateless caller it requires store:false plus the encrypted reasoning
+// include so multi-step reasoning carries across turns (matches the Codex CLI).
+function transformCodexBody(raw: string): string | null {
   let obj: unknown;
   try {
     obj = JSON.parse(raw);
@@ -290,14 +289,13 @@ function stripMaxOutputTokens(raw: string): string | null {
   }
   if (!obj || typeof obj !== "object") return null;
   const rec = obj as Record<string, unknown>;
-  let changed = false;
-  for (const key of ["maxOutputTokens", "max_output_tokens"]) {
-    if (key in rec) {
-      delete rec[key];
-      changed = true;
-    }
-  }
-  return changed ? JSON.stringify(rec) : null;
+  delete rec.maxOutputTokens;
+  delete rec.max_output_tokens;
+  rec.store = false;
+  const include = Array.isArray(rec.include) ? (rec.include as unknown[]) : [];
+  if (!include.includes("reasoning.encrypted_content")) include.push("reasoning.encrypted_content");
+  rec.include = include;
+  return JSON.stringify(rec);
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -423,6 +423,8 @@ function renderComposer() {
     selectedAgent: state.agent,
     autoApprove: state.autoApprove,
     brain: state.brain,
+    workerModel: state.workerModel,
+    workerModels: state.workerModels,
     onSend: (text) => { if (!isBusy()) sendText(text); },
     onStop: () => stopActive(),
     onUndo: () => undoLast(),
@@ -439,6 +441,11 @@ function renderComposer() {
       state.brain = brain === "worker" ? "worker" : "opencode";
       localStorage.setItem("oc.brain", state.brain);
       updateMode(); // composer visibility differs by brain (worker needs no box/session)
+      renderComposer(); // show/hide the worker-brain model picker
+    },
+    onWorkerModelChange: (model) => {
+      state.workerModel = model;
+      localStorage.setItem("oc.workerModel", model);
     },
   });
 }
@@ -1110,10 +1117,13 @@ async function sendToWorkerBrain(text) {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({ prompt: text, model: state.workerModel }),
       }),
     );
-    if (!res.ok || !res.body) throw new Error(`agent chat → ${res.status}`);
+    if (!res.ok || !res.body) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`agent chat → ${res.status}${detail ? ": " + detail.slice(0, 300) : ""}`);
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();

@@ -183,7 +183,7 @@ app.delete("/api/system-prompt", async (c) => {
 // streamText + stopWhen loop keeps calling tools across steps until the model is done.
 app.post("/api/agent/chat", async (c) => {
   c.executionCtx.waitUntil(ensureFlyMachineStarted(c.env).catch(() => {})); // tools need the box up
-  const body = (await c.req.json().catch(() => ({}))) as { prompt?: string; messages?: any[]; system?: string };
+  const body = (await c.req.json().catch(() => ({}))) as { prompt?: string; messages?: any[]; system?: string; model?: string };
   try {
     const result = await runAgentChat(c.env, body);
     return result.toUIMessageStreamResponse();

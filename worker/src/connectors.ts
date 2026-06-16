@@ -218,7 +218,10 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
 // as its encrypted secret (JSON → encryptSecret), with provider "openai-chatgpt" and config
 // { model }. resolveModel (provider.ts) reads it back and drives the codex fetch wrapper.
 export const OPENAI_CHATGPT_PROVIDER = "openai-chatgpt";
-export const DEFAULT_CHATGPT_MODEL = "gpt-5.1-codex";
+// Codex-backend models available to ChatGPT subscribers (per opencode's ALLOWED_MODELS). The client
+// can pick any of these per request; this is the fallback when none is chosen.
+export const DEFAULT_CHATGPT_MODEL = "gpt-5.5";
+export const CHATGPT_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
 
 interface ChatGptBundle {
   access: string;

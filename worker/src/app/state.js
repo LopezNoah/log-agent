@@ -7,6 +7,9 @@ export const state = {
   // Which "brain" handles a send: "opencode" (the box, default) or "worker" (the Worker-side
   // /api/agent/chat agent). Opt-in: defaults to "opencode" so nothing changes unless toggled.
   brain: localStorage.getItem("oc.brain") === "worker" ? "worker" : "opencode",
+  // Codex-backend models for the ChatGPT-subscription worker brain (the composer's model picker).
+  workerModels: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
+  workerModel: localStorage.getItem("oc.workerModel") || "gpt-5.5",
   autoApprove: localStorage.getItem("oc.autoApprove") !== "0", // default on
   machineOn: false, // whether the Fly box is started (chat is live only when true)
   busy: new Set(), // sessionIDs currently generating a response (drives Stop vs Send)

@@ -21,6 +21,9 @@ export interface ComposerProps {
   autoApprove: boolean;
   // Brain toggle (opt-in). Defaults to "opencode" upstream so the existing send path is untouched.
   brain: Brain;
+  // Worker-brain model picker (shown only when brain === "worker"); sent with each /api/agent/chat.
+  workerModel: string;
+  workerModels: string[];
   onSend: (text: string) => void;
   onStop: () => void;
   onUndo: () => void;
@@ -30,6 +33,7 @@ export interface ComposerProps {
   onAgentChange: (name: string) => void;
   onAutoApproveChange: (checked: boolean) => void;
   onBrainChange: (brain: Brain) => void;
+  onWorkerModelChange: (model: string) => void;
 }
 
 function Composer(handle: Handle<ComposerProps>) {
@@ -130,6 +134,18 @@ function Composer(handle: Handle<ComposerProps>) {
               <option value="opencode">🧠 opencode</option>
               <option value="worker">⚡ worker</option>
             </select>
+            {p.brain === "worker" && (
+              <select
+                className="agent-select"
+                title="Worker-brain model"
+                value={p.workerModel}
+                mix={on("change", (event) => p.onWorkerModelChange(event.currentTarget.value))}
+              >
+                {p.workerModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            )}
             <select
               className="agent-select"
               title="Agent mode"

@@ -29,35 +29,39 @@ interface LlmRow {
 // in the Worker only. config.model is "provider/modelID" (e.g. "anthropic/claude-sonnet-4-6"); the
 // SDK model id is everything after the connector-provider prefix (openrouter keeps its own
 // provider-prefixed ids, which falls out naturally).
-export async function resolveModel(env: Env): Promise<{ model: LanguageModel; label: string }> {
+export async function resolveModel(env: Env, modelOverride?: string): Promise<{ model: LanguageModel; label: string }> {
   const row = await env.DB.prepare(
     "SELECT provider, config, secret_ciphertext, secret_iv FROM connectors WHERE type = 'llm' AND is_default = 1",
   ).first<LlmRow>();
   if (!row) throw new Error("no_default_llm_connector");
 
   const fullModel: string = (row.config ? safeParse(row.config) : {}).model || "";
-  const modelId = fullModel.split("/").slice(1).join("/") || fullModel;
+  // The client may pick a model per request (the composer's worker-brain model picker); otherwise
+  // fall back to the connector's stored model id.
+  const override = modelOverride?.trim();
+  const modelId = override || fullModel.split("/").slice(1).join("/") || fullModel;
+  const label = override || fullModel;
 
   // ChatGPT-subscription OAuth: the secret is an encrypted OAuth bundle (not an API key). Build a
   // codex-backed model whose custom fetch injects the bearer token + ChatGPT-Account-Id and
   // refreshes/persists tokens to D1. Resolve before the generic decryptSecret below.
   if (row.provider === OPENAI_CHATGPT_PROVIDER) {
-    return { model: await chatGptModel(env, modelId || fullModel), label: fullModel || `${OPENAI_CHATGPT_PROVIDER}/${DEFAULT_CHATGPT_MODEL}` };
+    return { model: await chatGptModel(env, modelId || DEFAULT_CHATGPT_MODEL), label: label || `${OPENAI_CHATGPT_PROVIDER}/${DEFAULT_CHATGPT_MODEL}` };
   }
 
   const key = await decryptSecret(env, row.secret_ciphertext, row.secret_iv);
 
   switch (row.provider) {
     case "anthropic":
-      return { model: createAnthropic({ apiKey: key })(modelId || "claude-sonnet-4-6"), label: fullModel };
+      return { model: createAnthropic({ apiKey: key })(modelId || "claude-sonnet-4-6"), label };
     case "openai":
-      return { model: createOpenAI({ apiKey: key })(modelId || "gpt-4o"), label: fullModel };
+      return { model: createOpenAI({ apiKey: key })(modelId || "gpt-4o"), label };
     case "openrouter":
-      return { model: createOpenAICompatible({ name: "openrouter", baseURL: "https://openrouter.ai/api/v1", apiKey: key })(modelId), label: fullModel };
+      return { model: createOpenAICompatible({ name: "openrouter", baseURL: "https://openrouter.ai/api/v1", apiKey: key })(modelId), label };
     case "groq":
-      return { model: createOpenAICompatible({ name: "groq", baseURL: "https://api.groq.com/openai/v1", apiKey: key })(modelId), label: fullModel };
+      return { model: createOpenAICompatible({ name: "groq", baseURL: "https://api.groq.com/openai/v1", apiKey: key })(modelId), label };
     case "google":
-      return { model: createGoogleGenerativeAI({ apiKey: key })(modelId || "gemini-2.0-flash"), label: fullModel };
+      return { model: createGoogleGenerativeAI({ apiKey: key })(modelId || "gemini-2.0-flash"), label };
     default:
       throw new Error("unsupported_provider:" + row.provider);
   }
