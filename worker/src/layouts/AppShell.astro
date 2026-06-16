@@ -1,3 +1,18 @@
+---
+// SSR pre-fetch: read the cached session list straight from the SyncHub durable object (the same
+// data it sends over the /sync WebSocket on connect) and inline it so the session rail paints on
+// first render instead of waiting for the WebSocket round-trip. Pure cache read — no upstream call,
+// never wakes the Fly box. Falls back silently to the WebSocket snapshot if the DO is unreachable.
+import { env } from "cloudflare:workers";
+
+let bootSessions: unknown[] = [];
+try {
+  bootSessions = await env.SYNC.getByName("hub").snapshotSessions();
+} catch {
+  /* DO unavailable — the client still loads sessions over the WebSocket */
+}
+let bootJson = JSON.stringify({ sessions: bootSessions }).replace(/</g, "\\u003c");
+---
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,6 +21,7 @@
   <title>opencode phone</title>
   <link rel="stylesheet" href="/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/styles.css">
+  <script id="oc-boot" type="application/json" set:html={bootJson}></script>
   <script is:inline defer src="/vendor/marked.min.js"></script>
   <script is:inline defer src="/vendor/katex/katex.min.js"></script>
   <script is:inline defer src="/vendor/marked-katex.umd.js"></script>
@@ -53,31 +69,9 @@
 
       <div id="offline-banner" class="offline-banner" hidden></div>
 
-      <form id="composer" class="composer" autocomplete="off" hidden>
-        <div class="mx-auto w-full max-w-3xl">
-          <div id="revert-banner" class="revert-banner" hidden></div>
-          <div class="composer-bar">
-            <div class="composer-tools">
-              <button id="act-undo" class="msg-act" type="button" title="Undo the last turn (revert)">↶ Undo</button>
-              <button id="act-redo" class="msg-act" type="button" title="Redo (unrevert)" hidden>↷ Redo</button>
-              <button id="act-compact" class="msg-act" type="button" title="Compact the conversation (summarize to free context)">⊟ Compact</button>
-              <button id="act-fork" class="msg-act" type="button" title="Fork this session into a new one">⑂ Fork</button>
-            </div>
-            <textarea id="input" name="prompt" rows="1" class="w-full bg-transparent outline-none resize-none max-h-56 py-0.5"
-              autocomplete="off" autocapitalize="sentences" autocorrect="on" spellcheck="true"
-              data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"
-              placeholder="Message opencode…  (Enter to send · Shift+Enter for newline)"></textarea>
-            <div class="flex items-center gap-2 mt-2">
-              <select id="agent-select" class="agent-select" title="Agent mode"></select>
-              <label class="auto-toggle" title="Auto-approve every tool action in this session (no prompts) — for unattended runs">
-                <input type="checkbox" id="auto-approve"> ⚡ Auto-approve
-              </label>
-              <button id="send" class="btn btn-primary ml-auto" type="submit">Send</button>
-              <button id="stop" class="btn btn-stop ml-auto" type="button" hidden title="Stop generating (Esc)">■ Stop</button>
-            </div>
-          </div>
-        </div>
-      </form>
+      <!-- Composer is a Remix (remix/ui) component mounted into this container by main.js
+           (src/client/composer.tsx). updateMode() still toggles its `hidden`. -->
+      <div id="composer" class="composer" hidden></div>
     </main>
 
     <aside id="files-pane" class="files-pane flex flex-col min-h-0 bg-panel border-l border-line">

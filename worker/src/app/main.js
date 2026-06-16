@@ -12,6 +12,7 @@ import { setupMarkdown, renderMarkdown } from "./markdown.js";
 import { closeSidebar, setupMobile } from "./mobile.js";
 import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
 import { mountSessionList } from "../client/session-list.tsx";
+import { mountComposer } from "../client/composer.tsx";
 
 // --------------------------------------------------------------------------- machine
 
@@ -407,6 +408,33 @@ async function renameSession(s, title) {
   }
 }
 
+// The composer is a Remix (remix/ui) component mounted into #composer (see init()). renderComposer()
+// pushes current state + action callbacks to it. The legacy renderComposerState()/renderSessionBar()
+// names stay as thin delegates so their many call sites keep working.
+let updateComposer = null;
+let composerApi = null;
+function renderComposer() {
+  updateComposer?.({
+    busy: isBusy(),
+    reverted: state.machineOn && !!state.activeId && !!activeSession()?.revert,
+    agents: state.agents,
+    selectedAgent: state.agent,
+    autoApprove: state.autoApprove,
+    onSend: (text) => { if (!isBusy()) sendText(text); },
+    onStop: () => stopActive(),
+    onUndo: () => undoLast(),
+    onRedo: () => unrevertSession(),
+    onCompact: () => compactSession(),
+    onFork: () => forkSession(),
+    onAgentChange: (name) => { state.agent = name; },
+    onAutoApproveChange: (checked) => {
+      state.autoApprove = checked;
+      localStorage.setItem("oc.autoApprove", checked ? "1" : "0");
+      if (state.activeId) applyPermission(state.activeId, state.autoApprove);
+    },
+  });
+}
+
 async function deleteSession(s, anchor) {
   const ok = await confirmAction(anchor, {
     title: "Delete session?",
@@ -427,21 +455,13 @@ async function loadAgents() {
     const agents = await api("/agent");
     const primary = (Array.isArray(agents) ? agents : []).filter((a) => a.mode === "primary" && a.description);
     if (!primary.length) return;
-    els.agentSelect.innerHTML = "";
-    for (const a of primary) {
-      const opt = document.createElement("option");
-      opt.value = a.name;
-      opt.textContent = a.name.charAt(0).toUpperCase() + a.name.slice(1);
-      els.agentSelect.appendChild(opt);
-    }
+    state.agents = primary.map((a) => ({ name: a.name, label: a.name.charAt(0).toUpperCase() + a.name.slice(1) }));
     state.agent = primary.some((a) => a.name === "build") ? "build" : primary[0].name;
-    els.agentSelect.value = state.agent;
+    renderComposer();
   } catch {
     /* agents unavailable until the box is up; ignore */
   }
 }
-
-els.agentSelect.addEventListener("change", () => { state.agent = els.agentSelect.value; });
 
 // Auto-approve: a per-session permission ruleset. Allow-all means opencode runs every tool
 // (bash, edit, …) without prompting — stored with the session, so it holds even after the
@@ -460,13 +480,6 @@ async function applyPermission(id, allow) {
     toast("Auto-approve update failed: " + e);
   }
 }
-
-els.autoApprove.checked = state.autoApprove;
-els.autoApprove.addEventListener("change", () => {
-  state.autoApprove = els.autoApprove.checked;
-  localStorage.setItem("oc.autoApprove", state.autoApprove ? "1" : "0");
-  if (state.activeId) applyPermission(state.activeId, state.autoApprove);
-});
 
 async function newSession() {
   const s = await api("/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -489,7 +502,7 @@ function selectSession(id, mode = "push") {
   updateMode();
   renderThread(true);
   syncSend({ type: "open", sessionID: id });
-  if (state.machineOn) els.input.focus();
+  if (state.machineOn) composerApi?.focusInput();
   if (mode === "push") history.pushState({ session: id }, "", sessionHref(id));
   else if (mode === "replace") history.replaceState({ session: id }, "", sessionHref(id));
 }
@@ -971,32 +984,9 @@ function textFallback(m) {
 
 // --------------------------------------------------------------------------- send
 
-els.composer.addEventListener("submit", (e) => { e.preventDefault(); send(); });
-els.input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  else if (e.key === "Escape" && isBusy()) { e.preventDefault(); stopActive(); }
-});
-els.input.addEventListener("input", () => {
-  els.input.style.height = "auto";
-  els.input.style.height = Math.min(els.input.scrollHeight, 220) + "px";
-});
-
-// Safari/iOS offers saved-password AutoFill on the first focus of any text field on a domain that
-// has stored credentials (our /login page) — it ignores autocomplete="off" for this. Keeping the
-// field readonly except while focused makes Safari skip the AutoFill prompt without affecting
-// typing: the field is readonly at the instant focus is evaluated, then editable immediately after.
-els.input.setAttribute("readonly", "");
-els.input.addEventListener("focus", () => els.input.removeAttribute("readonly"));
-els.input.addEventListener("blur", () => els.input.setAttribute("readonly", ""));
-
-function send() {
-  if (isBusy()) return; // generating — interrupt with Stop (Esc) first
-  const text = els.input.value.trim();
-  if (!text) return;
-  els.input.value = "";
-  els.input.style.height = "auto";
-  sendText(text);
-}
+// Composer input, send/stop, agent picker, auto-approve, and the Safari readonly autofill fix all
+// live in the Remix composer component (src/client/composer.tsx); it calls back via renderComposer's
+// onSend/onStop/etc. sendText() below is the shared post path (also used by artifact form widgets).
 
 // Post a message to the active session (used by the composer and by artifact widgets, e.g. a
 // submitted form). Optimistically shows the user bubble until the server echoes the real message.
@@ -1078,9 +1068,7 @@ function setBusy(id, on) {
 }
 
 function renderComposerState() {
-  const busy = isBusy();
-  if (els.send) els.send.hidden = busy;
-  if (els.stop) els.stop.hidden = !busy;
+  renderComposer();
 }
 
 // Self-heal busy on a fresh thread load: a session is generating iff its newest assistant message
@@ -1106,15 +1094,7 @@ function revertBoundaryCreated() {
 // The session tools live inside the composer (shown only when the box is up + a session is open),
 // so this only toggles the revert-only affordances: the Redo button and the reverted banner.
 function renderSessionBar() {
-  const reverted = state.machineOn && !!state.activeId && !!activeSession()?.revert;
-  els.actRedo.hidden = !reverted;
-  els.revertBanner.hidden = !reverted;
-  if (reverted) {
-    els.revertBanner.innerHTML =
-      `<span>↩ Reverted — later messages are hidden. Send a message to keep this point, or redo.</span>
-       <button class="btn btn-ghost" id="revert-redo" type="button">↷ Redo</button>`;
-    $("#revert-redo")?.addEventListener("click", () => unrevertSession());
-  }
+  renderComposer();
 }
 
 // --- actions ---
@@ -1153,10 +1133,7 @@ async function editMessage(messageID) {
   const m = state.messages.get(messageID);
   const text = m ? messageText(m) : "";
   await revertToMessage(messageID);
-  els.input.value = text;
-  els.input.style.height = "auto";
-  els.input.style.height = Math.min(els.input.scrollHeight, 220) + "px";
-  els.input.focus();
+  composerApi?.setInput(text);
 }
 
 async function forkSession(messageID) {
@@ -1228,11 +1205,6 @@ els.thread.addEventListener("click", (e) => {
   }
 });
 
-els.stop.addEventListener("click", () => stopActive());
-els.actUndo.addEventListener("click", () => undoLast());
-els.actRedo.addEventListener("click", () => unrevertSession());
-els.actCompact.addEventListener("click", () => compactSession());
-els.actFork.addEventListener("click", () => forkSession());
 
 // --------------------------------------------------------------------------- sync (WebSocket to the SyncHub DO)
 
@@ -1350,11 +1322,20 @@ els.newSession.addEventListener("click", () => newSession().catch((e) => toast(S
 
 async function init() {
   updateSessionList = mountSessionList(els.sessionList); // Remix-rendered session rail
+  composerApi = mountComposer(els.composer);             // Remix-rendered composer
+  updateComposer = composerApi.update;
+  renderComposer();                                      // initial paint (hidden until updateMode shows it)
   setupMobile();
   setupMarkdown();
   setupGithubProject();
   renderFiles("Start the machine to browse files.");
   await loadDefaultModel();
+  // SSR pre-fetch: paint the session rail from the server-inlined cache (AppShell.astro) before the
+  // WebSocket connects, so there's no empty-sidebar flash. connectSync()'s snapshot then reconciles.
+  try {
+    const boot = JSON.parse(document.getElementById("oc-boot")?.textContent || "{}");
+    if (Array.isArray(boot.sessions) && boot.sessions.length) setSessions(boot.sessions);
+  } catch { /* ignore malformed boot data */ }
   connectSync();                   // DO is always reachable; snapshot drives the rail + first select
   await refreshMachine();          // sets machineOn; loads agents + nudges the DO bridge if up
   setInterval(refreshMachine, 15000);

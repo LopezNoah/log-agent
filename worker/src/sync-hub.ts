@@ -235,6 +235,13 @@ export class SyncHub extends DurableObject<Env> {
     );
   }
 
+  // Server-side snapshot for SSR pre-fetch (AppShell.astro): the same cached session list the
+  // WebSocket sends on connect, read straight from the durable cache — no upstream call, doesn't
+  // wake the Fly box. Lets the session rail paint on first paint instead of after the WS round-trip.
+  async snapshotSessions(): Promise<unknown[]> {
+    return this.readCachedSessions();
+  }
+
   private readCachedSessions(): unknown[] {
     return this.sql("SELECT data FROM sessions ORDER BY updated_at DESC LIMIT 200")
       .toArray()
