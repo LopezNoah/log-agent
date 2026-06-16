@@ -186,8 +186,19 @@ app.post("/api/agent/chat", async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { prompt?: string; messages?: any[]; system?: string; model?: string };
   try {
     const result = await runAgentChat(c.env, body);
-    return result.toUIMessageStreamResponse();
+    // By default the AI SDK masks stream errors as "An error occurred." Surface the real provider
+    // error (status + response body for API errors) — this is a single-user tool — so failures
+    // (bad model id, codex body rejection, auth) are diagnosable in the client toast + logs.
+    return result.toUIMessageStreamResponse({
+      onError: (error) => {
+        const e = error as { responseBody?: string; message?: string; statusCode?: number };
+        const detail = e?.responseBody || e?.message || String(error);
+        console.error("agent chat stream error:", e?.statusCode ?? "", detail);
+        return e?.statusCode ? `[${e.statusCode}] ${detail}` : detail;
+      },
+    });
   } catch (e) {
+    console.error("agent chat error:", e);
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
 });
