@@ -10,6 +10,7 @@ import {
   upstreamHeaders,
 } from "./fly";
 import { registerAuthRoutes, requireSession } from "./auth";
+import { runAgentChat } from "./agent/runtime";
 import { fanOutNotification, registerConnectorRoutes } from "./connectors";
 import {
   getSystemPromptOverride,
@@ -131,6 +132,20 @@ app.put("/api/system-prompt", async (c) => {
 app.delete("/api/system-prompt", async (c) => {
   await setSystemPromptOverride(c.env, null);
   return c.json({ ok: true });
+});
+
+// Agent v2 (opt-in "worker brain"): run the AI SDK agent loop in the Worker. Tools (fs/exec) run
+// on the Fly box; provider keys are decrypted from connectors here and never sent to the box. The
+// streamText + stopWhen loop keeps calling tools across steps until the model is done.
+app.post("/api/agent/chat", async (c) => {
+  c.executionCtx.waitUntil(ensureFlyMachineStarted(c.env).catch(() => {})); // tools need the box up
+  const body = (await c.req.json().catch(() => ({}))) as { prompt?: string; messages?: any[]; system?: string };
+  try {
+    const result = await runAgentChat(c.env, body);
+    return result.toUIMessageStreamResponse();
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
 });
 
 // Unmatched API routes are 404 JSON.
