@@ -80,6 +80,16 @@ export interface LlmProviderMeta {
   model: string;
 }
 
+// State of the "Connect ChatGPT" device-code flow, owned by settings.js and passed down so the LLM
+// section can render the right step. idle → starting → awaiting (show code + link, polling) →
+// connected | error.
+export interface ChatgptConnectState {
+  status?: "idle" | "starting" | "awaiting" | "connected" | "error";
+  userCode?: string; // device user_code to type at the verification URL
+  verificationUri?: string; // where to enter the code
+  message?: string; // human-readable status/error line
+}
+
 export interface SettingsPanelProps {
   // --- data ---
   active: string; // active section id
@@ -93,12 +103,18 @@ export interface SettingsPanelProps {
   ghPermissions: string[];
   notifyProviders: Record<string, string>;
 
+  // ChatGPT OAuth connect (device-code flow). settings.js owns the start/poll requests + the
+  // success/error toasts; this component renders the button, the user_code + verification link, and
+  // a status line, all driven by `chatgptConnect` below.
+  chatgptConnect?: ChatgptConnectState;
+
   // --- callbacks (settings.js keeps request/reload/announceChange behind these) ---
   onSelectSection: (id: string, navButton: HTMLElement) => void;
   // LLM
   onAddLlm: (values: LlmFormValues) => void;
   onSetDefaultLlm: (id: string) => void;
   onEditLlm: (id: string) => void;
+  onConnectChatgpt: () => void; // kick off the OpenAI device-code OAuth flow
   onRemoveConnector: (id: string, anchor: HTMLElement) => void; // generic remove (pass anchor el)
   // GitHub
   onSaveGithub: (values: GithubFormValues, existing: Connector | null) => void;
@@ -259,6 +275,64 @@ function LlmSection(handle: Handle<SettingsPanelProps>) {
               No LLM keys yet. Add one below — the default key is what new sessions use.
             </p>
           )}
+        </div>
+
+        {/* Connect ChatGPT (Pro/Plus) via OpenAI device-code OAuth — an alternative to pasting an
+            API key. settings.js drives the start/poll requests behind onConnectChatgpt. */}
+        <div className="settings-form chatgpt-connect">
+          <h3>Connect ChatGPT (Pro/Plus)</h3>
+          {(() => {
+            let cg = p.chatgptConnect || {};
+            let status = cg.status || "idle";
+            if (status === "awaiting") {
+              return (
+                <div className="connector-status">
+                  Open{" "}
+                  {cg.verificationUri ? (
+                    <a href={cg.verificationUri} target="_blank" rel="noopener noreferrer">
+                      {cg.verificationUri}
+                    </a>
+                  ) : (
+                    "the verification page"
+                  )}{" "}
+                  and enter code <b className="chatgpt-code">{cg.userCode || "…"}</b>. Waiting for you
+                  to authorize…
+                </div>
+              );
+            }
+            if (status === "connected") {
+              return <div className="connector-status">✓ ChatGPT connected.</div>;
+            }
+            if (status === "error") {
+              return (
+                <div className="connector-status text-bad">
+                  {cg.message || "Couldn't connect ChatGPT. Try again."}
+                </div>
+              );
+            }
+            return (
+              <p className="text-muted text-sm">
+                Use your ChatGPT Pro/Plus subscription instead of an API key. You'll get a code to
+                enter on OpenAI's site.
+              </p>
+            );
+          })()}
+          <div className="settings-form-actions">
+            <button
+              className="btn btn-ghost"
+              type="button"
+              disabled={p.chatgptConnect?.status === "starting" || p.chatgptConnect?.status === "awaiting"}
+              mix={on("click", () => p.onConnectChatgpt())}
+            >
+              {p.chatgptConnect?.status === "starting"
+                ? "Starting…"
+                : p.chatgptConnect?.status === "awaiting"
+                  ? "Waiting…"
+                  : p.chatgptConnect?.status === "connected"
+                    ? "Reconnect ChatGPT"
+                    : "Connect ChatGPT"}
+            </button>
+          </div>
         </div>
 
         <form

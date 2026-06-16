@@ -11,7 +11,8 @@ import {
 } from "./fly";
 import { registerAuthRoutes, requireSession } from "./auth";
 import { runAgentChat } from "./agent/runtime";
-import { fanOutNotification, registerConnectorRoutes } from "./connectors";
+import { fanOutNotification, registerConnectorRoutes, storeChatGptConnector } from "./connectors";
+import { pollDeviceAuth, startDeviceAuth } from "./agent/chatgpt-oauth";
 import {
   getSystemPromptOverride,
   pushAllToBox,
@@ -89,6 +90,49 @@ app.post("/api/machine/stop", async (c) => {
 // ---------------------------------------------------------------------------
 
 registerConnectorRoutes(app);
+
+// ---------------------------------------------------------------------------
+// ChatGPT-subscription OAuth (device flow). Two steps the client drives:
+//   1) POST /api/connectors/openai-oauth/start  → { user_code, verification_uri, device_auth_id, interval }
+//      Client shows user_code + verification_uri; user enters the code at chatgpt.com.
+//   2) POST /api/connectors/openai-oauth/poll   { device_auth_id, user_code }
+//      → { status: "pending" | "connected" | "error" }. On "connected" we've exchanged + stored
+//        the encrypted OAuth bundle as the default LLM connector (provider "openai-chatgpt").
+// ---------------------------------------------------------------------------
+
+app.post("/api/connectors/openai-oauth/start", async (c) => {
+  if (!c.env.SETTINGS_ENC_KEY) return c.json({ error: "encryption_key_not_configured" }, 500);
+  try {
+    const start = await startDeviceAuth();
+    return c.json({
+      user_code: start.user_code,
+      verification_uri: start.verification_uri,
+      device_auth_id: start.device_auth_id,
+      interval: start.interval,
+    });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+  }
+});
+
+app.post("/api/connectors/openai-oauth/poll", async (c) => {
+  if (!c.env.SETTINGS_ENC_KEY) return c.json({ error: "encryption_key_not_configured" }, 500);
+  const body = (await c.req.json().catch(() => ({}))) as { device_auth_id?: string; user_code?: string };
+  if (!body.device_auth_id || !body.user_code) return c.json({ error: "missing_device_auth" }, 400);
+  try {
+    const result = await pollDeviceAuth({ device_auth_id: body.device_auth_id, user_code: body.user_code });
+    if (result.status === "connected") {
+      // Store the encrypted OAuth bundle as the default LLM connector. It's consumed worker-side
+      // by resolveModel (codex fetch wrapper); nothing needs to be pushed to the box.
+      await storeChatGptConnector(c.env, result.tokens);
+      return c.json({ status: "connected" });
+    }
+    if (result.status === "error") return c.json({ status: "error", error: result.error });
+    return c.json({ status: "pending" });
+  } catch (e) {
+    return c.json({ status: "error", error: e instanceof Error ? e.message : String(e) });
+  }
+});
 
 // Push the stored GitHub PAT to the box now (used by the Settings "Sync now" button). Only
 // meaningful while the machine is up; otherwise it's a no-op that reports not-synced.

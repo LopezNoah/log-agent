@@ -10,12 +10,17 @@ export interface Agent {
   label: string;
 }
 
+// Which engine handles a send: "opencode" (the box) or "worker" (the Worker-side agent endpoint).
+export type Brain = "opencode" | "worker";
+
 export interface ComposerProps {
   busy: boolean;
   reverted: boolean;
   agents: Agent[];
   selectedAgent: string | null;
   autoApprove: boolean;
+  // Brain toggle (opt-in). Defaults to "opencode" upstream so the existing send path is untouched.
+  brain: Brain;
   onSend: (text: string) => void;
   onStop: () => void;
   onUndo: () => void;
@@ -24,6 +29,7 @@ export interface ComposerProps {
   onFork: () => void;
   onAgentChange: (name: string) => void;
   onAutoApproveChange: (checked: boolean) => void;
+  onBrainChange: (brain: Brain) => void;
 }
 
 function Composer(handle: Handle<ComposerProps>) {
@@ -115,6 +121,15 @@ function Composer(handle: Handle<ComposerProps>) {
           />
 
           <div className="flex items-center gap-2 mt-2">
+            <select
+              className="agent-select brain-select"
+              title="Which brain handles your message — opencode (the box) or the Worker-side agent"
+              value={p.brain}
+              mix={on("change", (event) => p.onBrainChange(event.currentTarget.value as Brain))}
+            >
+              <option value="opencode">🧠 opencode</option>
+              <option value="worker">⚡ worker</option>
+            </select>
             <select
               className="agent-select"
               title="Agent mode"

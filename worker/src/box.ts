@@ -50,6 +50,9 @@ async function boxFetch(env: Env, path: string, body: unknown): Promise<boolean>
 export async function pushLlmCredential(env: Env): Promise<void> {
   const row = await defaultConnector(env, "llm");
   if (!row?.secret_ciphertext || !row.secret_iv) return;
+  // The ChatGPT-subscription connector stores an encrypted OAuth bundle (not an API key) and is
+  // consumed worker-side by resolveModel; pushing it to opencode's auth store would corrupt it.
+  if (row.provider === "openai-chatgpt") return;
   const key = await decryptSecret(env, row.secret_ciphertext, row.secret_iv);
   await boxFetch(env, `/opencode/auth/${encodeURIComponent(row.provider)}`, { type: "api", key });
 }

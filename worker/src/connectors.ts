@@ -25,7 +25,9 @@ async function syncToBox(env: Env, type: string): Promise<void> {
 type ConnectorType = "llm" | "github" | "fly" | "notification";
 
 const PROVIDERS: Record<ConnectorType, string[]> = {
-  llm: ["anthropic", "openai", "openrouter", "google", "groq"],
+  // "openai-chatgpt" is connected via the OAuth device-flow endpoints, not the manual POST form,
+  // but it's listed here so listing/PATCH/default validation accept it.
+  llm: ["anthropic", "openai", "openrouter", "google", "groq", "openai-chatgpt"],
   github: ["github"],
   fly: ["fly"],
   notification: ["slack", "discord", "webhook"],
@@ -208,6 +210,95 @@ export function registerConnectorRoutes(app: Hono<{ Bindings: Env }>): void {
     const ok = await postNotification(row.provider, url, "✅ opencode phone test notification").catch(() => false);
     return c.json({ ok });
   });
+}
+
+// ---------------------------------------------------------------- ChatGPT OAuth connector
+
+// The ChatGPT-subscription connector stores the OAuth bundle (access/refresh/expires/accountId)
+// as its encrypted secret (JSON → encryptSecret), with provider "openai-chatgpt" and config
+// { model }. resolveModel (provider.ts) reads it back and drives the codex fetch wrapper.
+export const OPENAI_CHATGPT_PROVIDER = "openai-chatgpt";
+export const DEFAULT_CHATGPT_MODEL = "gpt-5.1-codex";
+
+interface ChatGptBundle {
+  access: string;
+  refresh: string;
+  expires: number;
+  accountId: string;
+}
+
+// Find the openai-chatgpt LLM connector row, if one exists.
+async function getChatGptRow(env: Env): Promise<ConnectorRow | null> {
+  return env.DB.prepare(
+    "SELECT * FROM connectors WHERE type = 'llm' AND provider = ? LIMIT 1",
+  )
+    .bind(OPENAI_CHATGPT_PROVIDER)
+    .first<ConnectorRow>();
+}
+
+// Upsert the ChatGPT OAuth connector after a successful device-flow connect. Encrypts the bundle
+// and makes it the default LLM connector (so sessions use it immediately).
+export async function storeChatGptConnector(env: Env, bundle: ChatGptBundle, model?: string): Promise<void> {
+  const cipher = await encryptSecret(env, JSON.stringify(bundle));
+  const now = isoNow();
+  const existing = await getChatGptRow(env);
+  // Clear other defaults of this type first; this connector becomes the default.
+  await env.DB.prepare("UPDATE connectors SET is_default = 0 WHERE type = 'llm'").run();
+
+  if (existing) {
+    const config = JSON.stringify({ model: model || (parseConfigOf(existing).model as string) || DEFAULT_CHATGPT_MODEL });
+    await env.DB.prepare(
+      `UPDATE connectors SET config = ?, secret_ciphertext = ?, secret_iv = ?, secret_last4 = ?, is_default = 1, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(config, cipher.ct, cipher.iv, last4(bundle.access), now, existing.id)
+      .run();
+    return;
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO connectors (id, type, provider, label, config, secret_ciphertext, secret_iv, secret_last4, is_default, created_at, updated_at)
+     VALUES (?, 'llm', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      OPENAI_CHATGPT_PROVIDER,
+      "ChatGPT subscription",
+      JSON.stringify({ model: model || DEFAULT_CHATGPT_MODEL }),
+      cipher.ct,
+      cipher.iv,
+      last4(bundle.access),
+      now,
+      now,
+    )
+    .run();
+}
+
+// Read + decrypt the stored ChatGPT OAuth bundle. Throws if absent/corrupt.
+export async function readChatGptBundle(env: Env): Promise<ChatGptBundle> {
+  const row = await getChatGptRow(env);
+  if (!row?.secret_ciphertext || !row.secret_iv) throw new Error("chatgpt_connector_missing");
+  const json = await decryptSecret(env, row.secret_ciphertext, row.secret_iv);
+  const bundle = JSON.parse(json) as ChatGptBundle;
+  if (!bundle || typeof bundle.access !== "string") throw new Error("chatgpt_bundle_corrupt");
+  return bundle;
+}
+
+// Re-encrypt + persist a refreshed ChatGPT OAuth bundle (used by the codex fetch wrapper on
+// token refresh). Updates last4 to the new access token; leaves config/default flag untouched.
+export async function updateChatGptBundle(env: Env, bundle: ChatGptBundle): Promise<void> {
+  const row = await getChatGptRow(env);
+  if (!row) throw new Error("chatgpt_connector_missing");
+  const cipher = await encryptSecret(env, JSON.stringify(bundle));
+  await env.DB.prepare(
+    "UPDATE connectors SET secret_ciphertext = ?, secret_iv = ?, secret_last4 = ?, updated_at = ? WHERE id = ?",
+  )
+    .bind(cipher.ct, cipher.iv, last4(bundle.access), isoNow(), row.id)
+    .run();
+}
+
+function parseConfigOf(row: ConnectorRow): Record<string, unknown> {
+  return row.config ? safeParse(row.config) : {};
 }
 
 // ---------------------------------------------------------------- helpers used by the Worker

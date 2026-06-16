@@ -14,6 +14,7 @@ import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
 import { mountSessionList } from "../client/session-list.tsx";
 import { mountComposer } from "../client/composer.tsx";
 import { mountThread } from "../client/thread.tsx";
+import { createSseParser, createAcc, applyChunk } from "../client/ui-message-stream.ts";
 import { mountFilesPane } from "../client/files-pane.tsx";
 import { mountApp } from "../client/app.tsx";
 
@@ -310,11 +311,14 @@ function dirname(rel) {
 }
 
 // Composer is shown only when the box is up and a session is open. When the box is off we
-// show a read-only banner so saved sessions stay browsable.
+// show a read-only banner so saved sessions stay browsable. EXCEPTION: the "worker" brain runs
+// entirely Worker-side (no box needed), so the composer stays available whenever it's selected.
 function updateMode() {
-  if (state.machineOn) {
+  const workerBrain = state.brain === "worker";
+  if (state.machineOn || workerBrain) {
     els.offlineBanner.hidden = true;
-    els.composer.hidden = !state.activeId;
+    // Worker brain doesn't need a session either; opencode brain still requires one.
+    els.composer.hidden = workerBrain ? false : !state.activeId;
   } else {
     els.composer.hidden = true;
     els.offlineBanner.hidden = !state.activeId;
@@ -418,6 +422,7 @@ function renderComposer() {
     agents: state.agents,
     selectedAgent: state.agent,
     autoApprove: state.autoApprove,
+    brain: state.brain,
     onSend: (text) => { if (!isBusy()) sendText(text); },
     onStop: () => stopActive(),
     onUndo: () => undoLast(),
@@ -429,6 +434,11 @@ function renderComposer() {
       state.autoApprove = checked;
       localStorage.setItem("oc.autoApprove", checked ? "1" : "0");
       if (state.activeId) applyPermission(state.activeId, state.autoApprove);
+    },
+    onBrainChange: (brain) => {
+      state.brain = brain === "worker" ? "worker" : "opencode";
+      localStorage.setItem("oc.brain", state.brain);
+      updateMode(); // composer visibility differs by brain (worker needs no box/session)
     },
   });
 }
@@ -978,7 +988,10 @@ function textFallback(m) {
 
 // Post a message to the active session (used by the composer and by artifact widgets, e.g. a
 // submitted form). Optimistically shows the user bubble until the server echoes the real message.
+// When the "worker" brain is selected, route to the Worker-side agent endpoint instead — that path
+// is fully isolated below so the opencode flow here stays untouched for brain === "opencode".
 async function sendText(text) {
+  if (state.brain === "worker") return sendToWorkerBrain(text);
   if (!text || !state.activeId) return;
 
   const localId = "local-" + Date.now();
@@ -1008,6 +1021,92 @@ async function sendText(text) {
     });
   } catch (e) {
     toast("Send failed: " + e);
+  }
+}
+
+// --------------------------------------------------------------------------- worker brain
+
+// Opt-in alternate send path: POST to the Worker-side agent (/api/agent/chat) and render the
+// AI SDK v6 UI-message stream into the thread as it arrives. Fully isolated from the opencode path:
+// it builds two synthetic local-* message entries (a user bubble + a streaming assistant bubble)
+// directly in state.messages and feeds the assistant entry from the parsed stream. Because they are
+// `local-` ids they render in the thread regardless of state.activeId (orderedMessages keeps locals),
+// and the opencode sync layer never touches them.
+//
+// LIMITATION: these bubbles are client-only and ephemeral — they are NOT persisted to the box/DO, so
+// they vanish on a session switch or reload (and per-message actions don't show, since they're
+// local). That's acceptable for an MVP worker-brain preview. Tool calls render via the same
+// renderTool() the opencode path uses (the parser shapes parts as { type:"tool", state:{...} }).
+
+let workerBrainStreaming = false;
+
+async function sendToWorkerBrain(text) {
+  if (!text || workerBrainStreaming) return;
+
+  const ts = Date.now();
+  const userId = "local-wb-user-" + ts;
+  const asstId = "local-wb-asst-" + ts;
+
+  // Optimistic user bubble.
+  state.messages.set(userId, {
+    info: { id: userId, role: "user", sessionID: state.activeId, time: { created: ts } },
+    parts: new Map([["t", { type: "text", text }]]),
+    order: ["t"],
+  });
+  // Streaming assistant bubble (no time.completed → renderAssistant shows the caret while live).
+  const asstEntry = {
+    info: { id: asstId, role: "assistant", sessionID: state.activeId, time: { created: ts + 1 } },
+    parts: new Map(),
+    order: [],
+  };
+  state.messages.set(asstId, asstEntry);
+
+  workerBrainStreaming = true;
+  setBusy(state.activeId, true);
+  renderThread();
+  anchorTop(userId);
+
+  // Mirror the stream accumulator's parts into the assistant entry, then re-render the thread.
+  const acc = createAcc();
+  const sync = () => {
+    asstEntry.parts = new Map(acc.parts);
+    asstEntry.order = [...acc.order];
+    renderThread();
+  };
+
+  try {
+    const res = ensureAuthed(
+      await fetch("/api/agent/chat", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ prompt: text }),
+      }),
+    );
+    if (!res.ok || !res.body) throw new Error(`agent chat → ${res.status}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSseParser();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunks = parser.push(decoder.decode(value, { stream: true }));
+      let dirty = false;
+      for (const c of chunks) dirty = applyChunk(acc, c) || dirty;
+      if (dirty) sync();
+    }
+    for (const c of parser.flush()) applyChunk(acc, c);
+    sync();
+    if (acc.error) toast("Worker brain error: " + acc.error);
+  } catch (e) {
+    toast("Worker brain failed: " + (e?.message || e));
+  } finally {
+    // Mark the assistant message complete so renderAssistant drops the caret + shows the footer.
+    asstEntry.info.time = { ...asstEntry.info.time, completed: Date.now() };
+    workerBrainStreaming = false;
+    setBusy(state.activeId, false);
+    renderThread();
   }
 }
 

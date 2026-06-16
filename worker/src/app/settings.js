@@ -17,6 +17,9 @@ let connectors = []; // cached list from the API
 let envMeta = {}; // deployment-level info (e.g. whether a Fly env token is configured)
 let active = "llm";
 let systemPrompt = {}; // /api/system-prompt state ({loading}/{error}/{source,boxReachable,content})
+// "Connect ChatGPT" device-code flow state, projected into the LLM section's props.
+// status: idle | starting | awaiting | connected | error
+let chatgptConnect = { status: "idle" };
 
 // ---------------------------------------------------------------- provider metadata
 
@@ -90,6 +93,8 @@ export async function openSettings() {
   overlay.hidden = false;
   active = "llm";
   systemPrompt = {};
+  clearTimeout(chatgptPollTimer);
+  chatgptConnect = { status: "idle" };
   try {
     await reload();
   } catch {
@@ -101,6 +106,11 @@ export async function openSettings() {
 
 function closeSettings() {
   overlay.hidden = true;
+  // Stop any in-flight ChatGPT OAuth polling so it doesn't keep firing after the overlay closes.
+  clearTimeout(chatgptPollTimer);
+  if (chatgptConnect.status === "awaiting" || chatgptConnect.status === "starting") {
+    chatgptConnect = { status: "idle" };
+  }
 }
 
 // Single re-render seam: push fresh props (nav + active section + data) to the Remix settings
@@ -124,6 +134,7 @@ function buildProps() {
     vmSizes: VM_SIZES,
     ghPermissions: GH_PERMISSIONS,
     notifyProviders: NOTIFY_PROVIDERS,
+    chatgptConnect,
     // nav
     onSelectSection: (id, btn) => {
       active = id;
@@ -135,6 +146,7 @@ function buildProps() {
     onAddLlm: addLlm,
     onSetDefaultLlm: (id) => llmAction("default", id),
     onEditLlm: (id) => llmAction("edit", id),
+    onConnectChatgpt: connectChatgpt,
     onRemoveConnector: removeConnectorById,
     // GitHub
     onSaveGithub: saveGithub,
@@ -191,6 +203,83 @@ async function llmAction(act, id, anchor) {
     await reload(); announceChange(); render();
     toast("Updated");
   }
+}
+
+// ---------------------------------------------------------------- Connect ChatGPT (OAuth)
+
+// OpenAI device-code OAuth: POST /start to get a user_code + verification URL + a poll interval,
+// then poll /poll until connected (or error/timeout). The OAuth endpoints are owned by the Worker
+// (parallel agent); we only drive the UI + polling here. Re-renders the panel at each step via
+// the chatgptConnect prop. Guarded so a second click can't start a parallel flow.
+let chatgptPollTimer = 0;
+const CHATGPT_MAX_POLL_MS = 10 * 60 * 1000; // give up after 10 minutes
+
+async function connectChatgpt() {
+  if (chatgptConnect.status === "starting" || chatgptConnect.status === "awaiting") return;
+  clearTimeout(chatgptPollTimer);
+  chatgptConnect = { status: "starting" };
+  render();
+  let start;
+  try {
+    start = await request("/api/connectors/openai-oauth/start", { method: "POST" });
+  } catch (err) {
+    chatgptConnect = { status: "error", message: "Couldn't start: " + err.message };
+    render();
+    return;
+  }
+  const deviceAuthId = start?.device_auth_id;
+  const userCode = start?.user_code;
+  const verificationUri = start?.verification_uri;
+  if (!deviceAuthId || !userCode) {
+    chatgptConnect = { status: "error", message: "OAuth start returned no device code." };
+    render();
+    return;
+  }
+  chatgptConnect = { status: "awaiting", userCode, verificationUri };
+  render();
+
+  const intervalMs = Math.max(2000, Number(start.interval || 5) * 1000);
+  const deadline = Date.now() + CHATGPT_MAX_POLL_MS;
+
+  const poll = async () => {
+    // Bail if the user closed settings or restarted the flow.
+    if (chatgptConnect.status !== "awaiting" || chatgptConnect.userCode !== userCode) return;
+    if (Date.now() > deadline) {
+      chatgptConnect = { status: "error", message: "Timed out waiting for authorization." };
+      render();
+      return;
+    }
+    let res;
+    try {
+      res = await request("/api/connectors/openai-oauth/poll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
+      });
+    } catch (err) {
+      chatgptConnect = { status: "error", message: "Poll failed: " + err.message };
+      render();
+      return;
+    }
+    if (res?.status === "connected") {
+      chatgptConnect = { status: "connected" };
+      try {
+        await reload();
+        announceChange();
+      } catch { /* connector list refresh is best-effort */ }
+      render();
+      toast("ChatGPT connected ✓");
+      return;
+    }
+    if (res?.status === "error") {
+      chatgptConnect = { status: "error", message: "Authorization failed." };
+      render();
+      return;
+    }
+    // status === "pending" (or unknown): keep polling.
+    chatgptPollTimer = setTimeout(poll, intervalMs);
+  };
+  chatgptPollTimer = setTimeout(poll, intervalMs);
 }
 
 // ---------------------------------------------------------------- GitHub
