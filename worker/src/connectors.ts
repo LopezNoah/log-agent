@@ -239,29 +239,43 @@ async function getChatGptRow(env: Env): Promise<ConnectorRow | null> {
     .first<ConnectorRow>();
 }
 
-// Upsert the ChatGPT OAuth connector after a successful device-flow connect. Encrypts the bundle
-// and makes it the default LLM connector (so sessions use it immediately).
+// Upsert the ChatGPT OAuth connector after a successful device-flow connect. The codex backend is
+// only reachable worker-side (and only via the box relay), and opencode CANNOT consume an OAuth
+// bundle — so this connector must never hijack the default LLM connector that the opencode brain
+// relies on. We only make it the default when there is no other usable LLM connector; otherwise it
+// is stored as a non-default, opt-in connector for the worker brain. Connecting ChatGPT therefore
+// never breaks the opencode brain.
 export async function storeChatGptConnector(env: Env, bundle: ChatGptBundle, model?: string): Promise<void> {
   const cipher = await encryptSecret(env, JSON.stringify(bundle));
   const now = isoNow();
   const existing = await getChatGptRow(env);
-  // Clear other defaults of this type first; this connector becomes the default.
-  await env.DB.prepare("UPDATE connectors SET is_default = 0 WHERE type = 'llm'").run();
+
+  // Is there a real (non-chatgpt, key-bearing) LLM connector already? If so, leave it the default.
+  const otherLlm = await env.DB.prepare(
+    "SELECT id FROM connectors WHERE type = 'llm' AND provider != ? AND secret_ciphertext IS NOT NULL LIMIT 1",
+  )
+    .bind(OPENAI_CHATGPT_PROVIDER)
+    .first<{ id: string }>();
+  const makeDefault = otherLlm ? 0 : 1;
+  if (makeDefault) {
+    // No competing connector — safe to clear stale defaults and own it.
+    await env.DB.prepare("UPDATE connectors SET is_default = 0 WHERE type = 'llm'").run();
+  }
 
   if (existing) {
     const config = JSON.stringify({ model: model || (parseConfigOf(existing).model as string) || DEFAULT_CHATGPT_MODEL });
     await env.DB.prepare(
-      `UPDATE connectors SET config = ?, secret_ciphertext = ?, secret_iv = ?, secret_last4 = ?, is_default = 1, updated_at = ?
+      `UPDATE connectors SET config = ?, secret_ciphertext = ?, secret_iv = ?, secret_last4 = ?, is_default = ?, updated_at = ?
        WHERE id = ?`,
     )
-      .bind(config, cipher.ct, cipher.iv, last4(bundle.access), now, existing.id)
+      .bind(config, cipher.ct, cipher.iv, last4(bundle.access), makeDefault, now, existing.id)
       .run();
     return;
   }
 
   await env.DB.prepare(
     `INSERT INTO connectors (id, type, provider, label, config, secret_ciphertext, secret_iv, secret_last4, is_default, created_at, updated_at)
-     VALUES (?, 'llm', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+     VALUES (?, 'llm', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       crypto.randomUUID(),
@@ -271,6 +285,7 @@ export async function storeChatGptConnector(env: Env, bundle: ChatGptBundle, mod
       cipher.ct,
       cipher.iv,
       last4(bundle.access),
+      makeDefault,
       now,
       now,
     )

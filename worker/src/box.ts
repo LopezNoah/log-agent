@@ -46,13 +46,18 @@ async function boxFetch(env: Env, path: string, body: unknown): Promise<boolean>
   return true;
 }
 
-// Default LLM key → opencode's auth store (so sessions can use the provider).
+// Default LLM key → opencode's auth store (so sessions can use the provider). opencode cannot use
+// the ChatGPT-subscription connector (it's an encrypted OAuth bundle consumed worker-side by
+// resolveModel, not an API key), so we explicitly pick the best NON-chatgpt LLM connector — the
+// default one if it's pushable, else the newest key-bearing one. If only the chatgpt connector
+// exists we push nothing and opencode falls back to its own configured provider (e.g. Ollama).
 export async function pushLlmCredential(env: Env): Promise<void> {
-  const row = await defaultConnector(env, "llm");
+  const row = await env.DB.prepare(
+    `SELECT provider, config, secret_ciphertext, secret_iv FROM connectors
+     WHERE type = 'llm' AND provider != 'openai-chatgpt' AND secret_ciphertext IS NOT NULL AND secret_iv IS NOT NULL
+     ORDER BY is_default DESC, updated_at DESC LIMIT 1`,
+  ).first<ConnectorRow>();
   if (!row?.secret_ciphertext || !row.secret_iv) return;
-  // The ChatGPT-subscription connector stores an encrypted OAuth bundle (not an API key) and is
-  // consumed worker-side by resolveModel; pushing it to opencode's auth store would corrupt it.
-  if (row.provider === "openai-chatgpt") return;
   const key = await decryptSecret(env, row.secret_ciphertext, row.secret_iv);
   await boxFetch(env, `/opencode/auth/${encodeURIComponent(row.provider)}`, { type: "api", key });
 }

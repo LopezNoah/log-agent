@@ -63,13 +63,17 @@ export async function getMachine() {
   }
 }
 
-// The default LLM connector's model is what we attach to each outgoing message.
+// The default LLM connector's model is what we attach to each outgoing opencode message. The
+// ChatGPT-subscription connector ("openai-chatgpt") is worker-brain-only — opencode can't use it —
+// so we never let it drive the opencode model. If it's the only LLM connector, leave state.model
+// null and opencode falls back to its own configured provider (e.g. Ollama on the box).
 export async function loadDefaultModel() {
   try {
     const res = ensureAuthed(await fetch("/api/connectors", { credentials: "same-origin" }));
     if (!res.ok) return;
     const { connectors } = await res.json();
-    const def = (connectors || []).find((c) => c.type === "llm" && c.isDefault);
+    const llms = (connectors || []).filter((c) => c.type === "llm" && c.provider !== "openai-chatgpt");
+    const def = llms.find((c) => c.isDefault) || llms[0];
     state.model = def?.config?.model || null;
   } catch {
     /* leave state.model as-is */
