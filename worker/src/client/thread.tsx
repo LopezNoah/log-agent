@@ -105,8 +105,18 @@ function ThreadView(handle: Handle<ThreadProps>) {
     handle.props.hydrate(el, message);
   }
 
-  // Called by the mount wrapper after each flush: re-apply bodies whose html changed (streaming) and
-  // prune signatures for messages that are gone.
+  // Called by the mount wrapper after each flush: re-apply message bodies into their persistent
+  // .msg-body nodes.
+  //
+  // CRUCIAL: remix reconciliation CLEARS the children of a vdom-empty node (our .msg-body, whose
+  // content we own via innerHTML) on EVERY re-render — not just when this message changed. So after
+  // any render, a body we previously injected is wiped even if its content is identical. A
+  // signature-only guard ("re-apply when html changed") therefore leaves every UNCHANGED message
+  // blank as soon as anything else triggers a render (a new message, a streaming token on another
+  // message, a fresh snapshot) — which blanks the whole history. We must re-apply whenever the node
+  // was wiped, regardless of whether the content changed. We still skip a node that is BOTH intact
+  // (has children) AND unchanged, so the just-inserted-via-ref node isn't painted twice and we don't
+  // re-run hydrate needlessly.
   function refreshBodies() {
     const live = new Set<string>();
     for (const m of handle.props.messages) {
@@ -114,11 +124,11 @@ function ThreadView(handle: Handle<ThreadProps>) {
       const el = bodyEls.get(m.info.id);
       if (!el || !el.isConnected) continue;
       const next = handle.props.renderBody(m);
-      if (bodySig.get(m.info.id) !== next) {
-        el.innerHTML = next;
-        bodySig.set(m.info.id, next);
-        handle.props.hydrate(el, m);
-      }
+      const wiped = el.childNodes.length === 0;
+      if (bodySig.get(m.info.id) === next && !wiped) continue; // intact + unchanged → leave it
+      el.innerHTML = next;
+      bodySig.set(m.info.id, next);
+      handle.props.hydrate(el, m);
     }
     for (const id of [...bodySig.keys()]) if (!live.has(id)) bodySig.delete(id);
     for (const id of [...bodyEls.keys()]) if (!live.has(id)) bodyEls.delete(id);
