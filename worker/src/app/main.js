@@ -13,12 +13,18 @@ import { closeSidebar, setupMobile } from "./mobile.js";
 import { confirmAction, escapeHtml, sleep, stringify, toast } from "./utils.js";
 import { mountSessionList } from "../client/session-list.tsx";
 import { mountComposer } from "../client/composer.tsx";
+import { mountThread } from "../client/thread.tsx";
+import { mountFilesPane } from "../client/files-pane.tsx";
 import { mountApp } from "../client/app.tsx";
 
 // Render the Remix layout into #root BEFORE anything else: every top-level els.* access below and
 // the per-region renderers depend on these nodes existing. dom.js resolves els lazily, so this is
 // the single point that must run first.
 mountApp(document.getElementById("root"));
+
+// Remix component handles, assigned in init() once their mount hosts exist (see mountThread /
+// mountFilesPane). renderThread()/renderFiles() guard on these so pre-init calls are no-ops.
+let threadApi = null;
 
 // --------------------------------------------------------------------------- machine
 
@@ -72,19 +78,20 @@ function onMachineDown() {
   state.files.selectedType = "directory";
   state.files.selectedMtime = "";
   state.files.dirty = false;
+  state.files.editorOpen = false;
+  filesPane?.clearEditor();
   renderFiles("Start the machine to browse files.");
 }
 
 // --------------------------------------------------------------------------- filesystem view
 
+// The files pane is a Remix (remix/ui) component mounted into #files-host (see init()). It owns the
+// toolbar (New file / New folder / Rename / Delete), the status line, the tree, and the editor —
+// wiring those to the callbacks renderFiles() feeds. The HEADER's #files-refresh button (not
+// rendered by the component) stays wired here; #files-close stays wired by mobile.js.
 els.filesRefresh.addEventListener("click", () => refreshFiles(true).catch((e) => toast("File refresh failed: " + e.message)));
-els.filesNewFile.addEventListener("click", () => createFile().catch((e) => toast("Create file failed: " + e.message)));
-els.filesNewFolder.addEventListener("click", () => createFolder().catch((e) => toast("Create folder failed: " + e.message)));
-els.fileSave.addEventListener("click", () => saveOpenFile().catch((e) => toast("Save failed: " + e.message)));
-els.fileRename.addEventListener("click", () => renameSelected().catch((e) => toast("Rename failed: " + e.message)));
-els.fileDelete.addEventListener("click", () => deleteSelected().catch((e) => toast("Delete failed: " + e.message)));
-els.fileEditorContent.addEventListener("input", () => { state.files.dirty = true; els.fileSave.disabled = false; });
 
+let filesPane = null;
 let filesRefreshTimer = 0;
 
 function scheduleFilesRefresh(delay = 700) {
@@ -131,53 +138,37 @@ function indexFileNode(node) {
   for (const child of node.children || []) indexFileNode(child);
 }
 
+// renderFiles() stays the single re-render seam the rest of the app calls — it now bridges current
+// state.files to the mounted files pane (projection + callbacks) instead of building DOM by hand.
+// The `status` argument maps to props.status; the component supplies "Workspace is empty." itself.
 function renderFiles(status) {
-  const disabled = !state.machineOn;
-  els.filesRefresh.disabled = disabled;
-  els.filesNewFile.disabled = disabled;
-  els.filesNewFolder.disabled = disabled;
-  els.fileRename.disabled = disabled || !state.files.selected;
-  els.fileDelete.disabled = disabled || !state.files.selected;
-  els.fileSave.disabled = disabled || !state.files.dirty || state.files.selectedType !== "file";
-  els.filesStatus.textContent = status || "";
-  els.filesStatus.hidden = !els.filesStatus.textContent;
-  els.filesTree.innerHTML = "";
-  if (!state.files.root) {
-    els.fileEditor.hidden = true;
-    return;
-  }
-  const rootChildren = state.files.root.children || [];
-  for (const child of rootChildren) els.filesTree.append(renderFileNode(child, 0));
-  if (!rootChildren.length) {
-    els.filesStatus.hidden = false;
-    els.filesStatus.textContent = "Workspace is empty.";
-  }
-}
-
-function renderFileNode(node, depth) {
-  const wrap = document.createElement("div");
-  const row = document.createElement("button");
-  const isDir = node.type === "directory";
-  const expanded = state.files.expanded.has(node.path);
-  row.className = "file-row" + (node.path === state.files.selected ? " selected" : "") + (isDir ? " dir" : " file");
-  row.style.paddingLeft = `${8 + depth * 16}px`;
-  row.innerHTML = `<span class="file-caret">${isDir ? (expanded ? "▾" : "▸") : ""}</span><span class="file-icon">${isDir ? "□" : "·"}</span><span class="file-name">${escapeHtml(node.name)}</span>`;
-  row.addEventListener("click", async () => {
-    if (isDir) await toggleFolder(node.path);
-    else await openFile(node.path);
+  filesPane?.update({
+    root: state.files.root,
+    expanded: state.files.expanded,
+    selected: state.files.selected,
+    status: status || "",
+    machineOn: state.machineOn,
+    editorOpen: state.files.editorOpen,
+    selectedType: state.files.selectedType,
+    dirty: state.files.dirty,
+    onSelectFile: (path) => { openFile(path).catch((e) => toast("Open failed: " + e.message)); },
+    onToggleDir: (path) => { toggleFolder(path).catch((e) => toast("Open failed: " + e.message)); },
+    onNewFile: () => { createFile().catch((e) => toast("Create file failed: " + e.message)); },
+    onNewFolder: () => { createFolder().catch((e) => toast("Create folder failed: " + e.message)); },
+    onRename: () => { renameSelected().catch((e) => toast("Rename failed: " + e.message)); },
+    onDelete: (anchor) => { deleteSelected(anchor).catch((e) => toast("Delete failed: " + e.message)); },
+    onRefresh: () => { refreshFiles(true).catch((e) => toast("File refresh failed: " + e.message)); },
+    onClose: () => {}, // mobile.js handles the header close button
+    onSave: () => { saveOpenFile().catch((e) => toast("Save failed: " + e.message)); },
+    onEditorInput: () => { state.files.dirty = true; renderFiles(); },
   });
-  wrap.append(row);
-  if (isDir && expanded) {
-    for (const child of node.children || []) wrap.append(renderFileNode(child, depth + 1));
-  }
-  return wrap;
 }
 
 async function toggleFolder(path) {
   const wasExpanded = state.files.expanded.has(path);
   state.files.selected = path;
   state.files.selectedType = "directory";
-  els.fileEditor.hidden = true;
+  state.files.editorOpen = false;
   if (wasExpanded) state.files.expanded.delete(path);
   else {
     state.files.expanded.add(path);
@@ -194,9 +185,8 @@ async function openFile(path) {
   state.files.selectedType = "file";
   state.files.selectedMtime = file.mtime || state.files.nodes.get(path)?.mtime || "";
   state.files.dirty = false;
-  els.fileEditor.hidden = false;
-  els.fileEditorPath.textContent = path;
-  els.fileEditorContent.value = file.content || "";
+  state.files.editorOpen = true;
+  filesPane?.setEditor(path, file.content || "");
   renderFiles();
 }
 
@@ -205,7 +195,7 @@ async function saveOpenFile() {
   await fsApi("/fs/file", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: state.files.selected, content: els.fileEditorContent.value }),
+    body: JSON.stringify({ path: state.files.selected, content: filesPane?.getEditorValue() ?? "" }),
   });
   state.files.dirty = false;
   toast("Saved " + state.files.selected);
@@ -254,16 +244,16 @@ async function renameSelected() {
   state.files.expanded.add(dirname(to));
   state.files.expanded.delete(from);
   state.files.selected = to;
-  if (state.files.selectedType === "file") els.fileEditorPath.textContent = to;
+  // The editor path is props-driven (selected + selectedType); just re-render to reflect the rename.
   await refreshFiles(true);
 }
 
-async function deleteSelected() {
+async function deleteSelected(anchor) {
   const rel = state.files.selected;
   if (!rel) return;
   const isDir = state.files.selectedType === "directory";
   const detail = isDir ? " and everything inside it" : "";
-  const ok = await confirmAction(els.fileDelete, {
+  const ok = await confirmAction(anchor || els.fileDelete, {
     title: `Delete ${isDir ? "folder" : "file"}?`,
     body: `${rel}${detail} — this can't be undone.`,
   });
@@ -273,7 +263,8 @@ async function deleteSelected() {
   state.files.selectedType = "directory";
   state.files.selectedMtime = "";
   state.files.dirty = false;
-  els.fileEditor.hidden = true;
+  state.files.editorOpen = false;
+  filesPane?.clearEditor();
   await refreshFiles(true);
 }
 
@@ -286,14 +277,16 @@ async function syncOpenFileAfterRefresh() {
     state.files.selectedType = "directory";
     state.files.selectedMtime = "";
     state.files.dirty = false;
-    els.fileEditor.hidden = true;
+    state.files.editorOpen = false;
+    filesPane?.clearEditor();
     return;
   }
   if (state.files.selectedType !== "file") return;
   if (node.type !== "file") {
     state.files.selectedType = node.type;
     state.files.selectedMtime = node.mtime || "";
-    els.fileEditor.hidden = true;
+    state.files.editorOpen = false;
+    filesPane?.clearEditor();
     return;
   }
   if (state.files.dirty) return;
@@ -301,9 +294,8 @@ async function syncOpenFileAfterRefresh() {
   const file = await fsApi(`/fs/file?path=${encodeURIComponent(selected)}`);
   if (state.files.selected !== selected || state.files.dirty) return;
   state.files.selectedMtime = file.mtime || node.mtime || "";
-  els.fileEditor.hidden = false;
-  els.fileEditorPath.textContent = selected;
-  els.fileEditorContent.value = file.content || "";
+  state.files.editorOpen = true;
+  filesPane?.setEditor(selected, file.content || "");
 }
 
 function currentDirectory() {
@@ -504,7 +496,6 @@ function selectSession(id, mode = "push") {
   state.activeId = id;
   state.messages.clear();
   renderSessions();
-  els.empty.style.display = "none";
   updateMode();
   renderThread(true);
   syncSend({ type: "open", sessionID: id });
@@ -589,24 +580,30 @@ function orderedMessages() {
 
 function renderThread(scroll = false) {
   const prevTop = els.thread.scrollTop;
-  els.threadContent.querySelectorAll(".msg").forEach((n) => n.remove());
-  mountQueue = []; // artifact placeholders to hydrate after innerHTML is in place
 
-  renderPinned();
-
-  const revertBoundary = revertBoundaryCreated();
-  for (const m of orderedMessages()) {
-    const node = document.createElement("div");
-    node.className = "msg " + (m.info.role || "assistant");
-    node.dataset.mid = m.info.id;
-    const local = m.info.id?.startsWith("local-");
-    if (revertBoundary && !local && (m.info.time?.created || 0) >= revertBoundary) node.classList.add("reverted");
-    const body = m.info.role === "user" ? renderUser(m) : renderAssistant(m);
-    node.innerHTML = `<div class="role">${escapeHtml(m.info.role || "assistant")}</div>${body}${renderMsgActions(m)}`;
-    els.threadContent.appendChild(node);
-  }
-
-  drainArtifacts();
+  // The thread is a Remix (remix/ui) component mounted into #thread-content (see init()). It renders
+  // #empty + the pinned section + the .msg list; main.js still owns the rich-content pipeline
+  // (renderBody) and the artifact mounts (hydrate/mountPin), plus all the scroll/observer/nav code.
+  mountQueue = []; // bound cross-render accumulation (matches the old reset; renderBody pushes into it)
+  threadApi?.update({
+    messages: orderedMessages(),
+    revertBoundary: revertBoundaryCreated(),
+    machineOn: state.machineOn,
+    pins: pinsFor(state.activeId).map((spec, i) => ({
+      domId: "pin_" + String(spec.__id ?? i).replace(/[^A-Za-z0-9_-]/g, ""),
+      spec,
+    })),
+    renderBody: (m) => (m.info.role === "user" ? renderUser(m) : renderAssistant(m)),
+    hydrate: () => drainArtifacts(),
+    mountPin: (slotEl, pin) => mountArtifact(slotEl, pin.spec, artifactCtx(pin.spec)),
+    onAct: (action, id, anchor) => {
+      if (action === "edit") editMessage(id);
+      else if (action === "revert") revertToMessage(id, "Reverted — use Redo to restore.");
+      else if (action === "fork") forkSession(id);
+      else if (action === "copy") copyMessage(id);
+      else if (action === "delete") deleteMessage(id, anchor);
+    },
+  });
   renderUsageTotal();
   renderThreadNav();
 
@@ -666,7 +663,7 @@ function promptPreview(m) {
 }
 
 function msgNode(mid) {
-  return mid ? els.threadContent.querySelector(`.msg[data-mid="${mid}"]`) : null;
+  return threadApi?.msgNode(mid) ?? null;
 }
 
 function updateScrollAffordances() {
@@ -839,24 +836,9 @@ function togglePin(spec) {
 }
 
 // Pinned artifacts render in a sticky section at the top of the thread and persist (localStorage)
-// across reloads for that session, unlike ephemeral in-message widgets.
-function renderPinned() {
-  const pins = pinsFor(state.activeId);
-  if (!pins.length) return;
-  const sec = document.createElement("div");
-  sec.className = "msg pinned-section";
-  sec.innerHTML = `<div class="role">📌 pinned</div>`;
-  for (let i = 0; i < pins.length; i++) {
-    const spec = pins[i];
-    const domId = "pin_" + String(spec.__id || i).replace(/[^A-Za-z0-9_-]/g, "");
-    const slot = document.createElement("div");
-    slot.className = "artifact-slot";
-    slot.id = domId;
-    sec.appendChild(slot);
-    mountQueue.push({ domId, spec });
-  }
-  els.threadContent.appendChild(sec);
-}
+// across reloads for that session, unlike ephemeral in-message widgets. The thread component now
+// renders the pinned section + slots from props.pins; main.js only mounts each slot via mountPin
+// (see renderThread) and toggles membership here (togglePin → renderThread re-render).
 
 function fmtTokens(n) {
   if (!n) return "0";
@@ -1181,36 +1163,10 @@ function copyMessage(messageID) {
   navigator.clipboard.writeText(text).then(() => toast("Copied"), () => toast("Copy failed"));
 }
 
-// Per-message hover actions. Skipped for the optimistic local bubble and while the box is off.
-function renderMsgActions(m) {
-  if (!state.machineOn || m.info.id?.startsWith("local-")) return "";
-  const id = escapeHtml(m.info.id);
-  const btn = (act, label, title, cls = "") =>
-    `<button class="msg-act ${cls}" type="button" data-act="${act}" data-id="${id}" title="${escapeHtml(title)}">${label}</button>`;
-  const acts = [];
-  if (m.info.role === "user") acts.push(btn("edit", "✎", "Edit & resend"));
-  acts.push(btn("revert", "↶", "Revert to before this message"));
-  acts.push(btn("fork", "⑂", "Fork a new session here"));
-  acts.push(btn("copy", "⧉", "Copy text"));
-  acts.push(btn("delete", "🗑", "Delete message", "danger"));
-  return `<div class="msg-actions">${acts.join("")}</div>`;
-}
-
-// One delegated handler for every message's action buttons — survives the per-render rebuild of
-// .msg nodes (the #thread element itself is never replaced).
-els.thread.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-act]");
-  if (!btn || !els.thread.contains(btn)) return;
-  const id = btn.dataset.id;
-  switch (btn.dataset.act) {
-    case "edit": editMessage(id); break;
-    case "revert": revertToMessage(id, "Reverted — use Redo to restore."); break;
-    case "fork": forkSession(id); break;
-    case "copy": copyMessage(id); break;
-    case "delete": deleteMessage(id, btn); break;
-  }
-});
-
+// Per-message hover actions + their dispatch now live in the Remix thread component
+// (src/client/thread.tsx): it renders true buttons (gated on machineOn / non-local, matching the old
+// renderMsgActions) and calls back via props.onAct(action, messageId, anchorEl) — wired in
+// renderThread() to editMessage / revertToMessage / forkSession / copyMessage / deleteMessage.
 
 // --------------------------------------------------------------------------- sync (WebSocket to the SyncHub DO)
 
@@ -1309,7 +1265,8 @@ function removeSession(id) {
   if (state.activeId === id) {
     state.activeId = null;
     els.composer.hidden = true;
-    els.empty.style.display = "";
+    state.messages.clear();
+    renderThread(); // repaint so the thread component shows #empty again
     history.replaceState({}, "", "/"); // drop /sessions/<id> now that nothing is open
     renderSessionBar();
   }
@@ -1330,6 +1287,8 @@ async function init() {
   updateSessionList = mountSessionList(els.sessionList); // Remix-rendered session rail
   composerApi = mountComposer(els.composer);             // Remix-rendered composer
   updateComposer = composerApi.update;
+  threadApi = mountThread(els.threadContent);            // Remix-rendered chat thread (+ #empty + pins)
+  filesPane = mountFilesPane(els.filesHost);             // Remix-rendered files pane
   renderComposer();                                      // initial paint (hidden until updateMode shows it)
   setupMobile();
   setupMarkdown();

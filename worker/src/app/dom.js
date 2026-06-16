@@ -39,6 +39,7 @@ const SELECTORS = {
   githubProjectPayload: "#github-project-payload",
   openSettings: "#open-settings",
   filesRoot: "#files-root",
+  filesHost: "#files-host",
   filesRefresh: "#files-refresh",
   filesClose: "#files-close",
   filesNewFile: "#files-new-file",

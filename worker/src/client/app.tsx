@@ -39,12 +39,8 @@ function App(_handle: Handle) {
         <main className="flex flex-col min-w-0 min-h-0 relative">
           <div id="usage-total" className="usage-total" hidden={true}></div>
           <div id="thread" className="flex-1 overflow-y-auto pt-7 pb-2 max-md:pt-16 min-h-0">
-            <div id="thread-content" className="min-h-full">
-              <div id="empty" className="h-full flex flex-col items-center justify-center text-center text-muted px-6">
-                <h1 className="text-3xl font-semibold tracking-tight text-zinc-100 mb-2">opencode phone</h1>
-                <p>A cloud computer for your agents. Pick a session or start a new one.</p>
-              </div>
-            </div>
+            {/* Remix thread mounts here (src/client/thread.tsx); it renders #empty + .msg list + pins */}
+            <div id="thread-content" className="min-h-full"></div>
           </div>
 
           <button id="jump-bottom" className="jump-bottom" type="button" hidden={true}>↓ Latest</button>
@@ -67,23 +63,9 @@ function App(_handle: Handle) {
               <button id="files-close" className="widget-act md:hidden" title="Close files">✕</button>
             </div>
           </header>
-          <div className="files-toolbar">
-            <button id="files-new-file" className="btn btn-ghost">New file</button>
-            <button id="files-new-folder" className="btn btn-ghost">New folder</button>
-            <button id="file-rename" className="btn btn-ghost">Rename</button>
-            <button id="file-delete" className="btn btn-ghost danger">Delete</button>
-          </div>
-          <div id="files-status" className="files-status">Start the machine to browse files.</div>
-          <div id="files-tree" className="files-tree" aria-label="Workspace files"></div>
-          <section id="file-editor" className="file-editor" hidden={true}>
-            <div className="file-editor-head">
-              <div id="file-editor-path" className="file-editor-path"></div>
-            </div>
-            <textarea id="file-editor-content" className="file-editor-content" spellCheck={false}></textarea>
-            <div className="file-editor-actions">
-              <button id="file-save" className="btn btn-primary">Save</button>
-            </div>
-          </section>
+          {/* Remix files pane mounts here (src/client/files-pane.tsx); it renders the toolbar,
+              status line, tree, and editor section (with the same ids) inside this host. */}
+          <div id="files-host" className="contents"></div>
         </aside>
       </div>
 

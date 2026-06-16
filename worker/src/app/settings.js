@@ -4,14 +4,19 @@
 // its own fetch + toast and tells the rest of the app when connectors change via an event.
 
 import { confirmAction } from "./utils.js";
+import { mountSettings } from "../client/settings-panel.tsx";
 
 // The settings overlay is rendered by the Remix <App> component, so it doesn't exist at module
 // load — resolve these lazily on first openSettings() (every other usage flows through that).
 let overlay, content, nav;
+// The settings nav + content are a Remix (remix/ui) component (src/client/settings-panel.tsx),
+// mounted lazily on first openSettings(); render() feeds it fresh props via buildProps().
+let settingsApi;
 
 let connectors = []; // cached list from the API
 let envMeta = {}; // deployment-level info (e.g. whether a Fly env token is configured)
 let active = "llm";
+let systemPrompt = {}; // /api/system-prompt state ({loading}/{error}/{source,boxReachable,content})
 
 // ---------------------------------------------------------------- provider metadata
 
@@ -57,14 +62,6 @@ function toast(msg) {
   setTimeout(() => t.remove(), 4000);
 }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-function byType(type) {
-  return connectors.filter((c) => c.type === type);
-}
-
 function announceChange() {
   window.dispatchEvent(new CustomEvent("connectors-changed"));
 }
@@ -77,28 +74,9 @@ async function reload() {
 
 // ---------------------------------------------------------------- shell
 
-function buildNav() {
-  const items = document.getElementById("settings-nav-items");
-  items.innerHTML = "";
-  for (const s of SECTIONS) {
-    if (s.group) {
-      const g = document.createElement("div");
-      g.className = "settings-nav-group";
-      g.textContent = s.label;
-      items.appendChild(g);
-      continue;
-    }
-    const b = document.createElement("button");
-    b.className = "settings-nav-item" + (s.indent ? " indent" : "") + (s.id === active ? " active" : "");
-    b.textContent = s.label;
-    b.addEventListener("click", () => { active = s.id; render(); scrollNavToActive(b); });
-    items.appendChild(b);
-  }
-}
-
 // On mobile the nav is a horizontal scroller — keep the selected pill in view.
 function scrollNavToActive(btn) {
-  if (window.matchMedia("(max-width: 767px)").matches) {
+  if (btn && window.matchMedia("(max-width: 767px)").matches) {
     btn.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
   }
 }
@@ -108,10 +86,10 @@ export async function openSettings() {
   content ??= document.getElementById("settings-content");
   nav ??= document.getElementById("settings-nav");
   wireSettings();
+  settingsApi ??= mountSettings(content, document.getElementById("settings-nav-items"));
   overlay.hidden = false;
   active = "llm";
-  buildNav();
-  content.innerHTML = `<div class="settings-loading text-muted">Loading…</div>`;
+  systemPrompt = {};
   try {
     await reload();
   } catch {
@@ -125,104 +103,70 @@ function closeSettings() {
   overlay.hidden = true;
 }
 
+// Single re-render seam: push fresh props (nav + active section + data) to the Remix settings
+// component. The component renders the nav from `sections`; settings.js no longer builds DOM.
 function render() {
-  buildNav();
-  const fn = RENDERERS[active] || renderPlaceholder;
   content.scrollTop = 0;
-  fn();
+  settingsApi.update(buildProps());
 }
 
-// ---------------------------------------------------------------- small DOM helpers
-
-function panel(title, subtitle, bodyHtml) {
-  return `<div class="settings-panel">
-    <header class="settings-panel-head">
-      <h2>${esc(title)}</h2>
-      ${subtitle ? `<p>${esc(subtitle)}</p>` : ""}
-    </header>
-    ${bodyHtml}
-  </div>`;
-}
-
-function field(label, inner, hint) {
-  return `<label class="settings-field"><span>${esc(label)}</span>${inner}${hint ? `<small>${esc(hint)}</small>` : ""}</label>`;
-}
-
-function secretPlaceholder(c) {
-  return c?.hasSecret ? `•••• ${esc(c.secretLast4 || "set")} — leave blank to keep` : "";
+// Project the module's state + canonical metadata + every action callback into the component's
+// SettingsPanelProps. The fetch/reload/announceChange/toast logic stays here, behind these callbacks.
+function buildProps() {
+  return {
+    // data
+    active,
+    sections: SECTIONS,
+    connectors,
+    env: envMeta,
+    systemPrompt,
+    llmProviders: LLM_PROVIDERS,
+    vmSizes: VM_SIZES,
+    ghPermissions: GH_PERMISSIONS,
+    notifyProviders: NOTIFY_PROVIDERS,
+    // nav
+    onSelectSection: (id, btn) => {
+      active = id;
+      if (id === "system") loadSystemPrompt();
+      render();
+      scrollNavToActive(btn);
+    },
+    // LLM
+    onAddLlm: addLlm,
+    onSetDefaultLlm: (id) => llmAction("default", id),
+    onEditLlm: (id) => llmAction("edit", id),
+    onRemoveConnector: removeConnectorById,
+    // GitHub
+    onSaveGithub: saveGithub,
+    onSyncGithub: syncGithub,
+    // Fly.io
+    onSaveFly: saveFly,
+    // Notifications
+    onAddNotification: addNotification,
+    onTestNotification: testNotification,
+    // System prompt
+    onSaveSystemPrompt: saveSystemPrompt,
+    onResetSystemPrompt: resetSystemPrompt,
+  };
 }
 
 // ---------------------------------------------------------------- LLM providers
 
-function renderLlm() {
-  const items = byType("llm");
-  const rows = items.length
-    ? items.map((c) => `
-      <div class="connector-row" data-id="${esc(c.id)}">
-        <div class="connector-main">
-          <div class="connector-title">
-            ${esc(LLM_PROVIDERS[c.provider]?.name || c.provider)}
-            ${c.isDefault ? `<span class="badge">default</span>` : ""}
-          </div>
-          <div class="connector-sub">${esc(c.config?.model || "no model set")} · key ••••${esc(c.secretLast4 || "")}</div>
-        </div>
-        <div class="connector-actions">
-          ${c.isDefault ? "" : `<button class="btn btn-ghost" data-act="default">Make default</button>`}
-          <button class="btn btn-ghost" data-act="edit">Edit</button>
-          <button class="btn btn-ghost text-bad" data-act="delete">Remove</button>
-        </div>
-      </div>`).join("")
-    : `<p class="text-muted text-sm">No LLM keys yet. Add one below — the default key is what new sessions use.</p>`;
-
-  const opts = Object.entries(LLM_PROVIDERS).map(([k, v]) => `<option value="${k}">${esc(v.name)}</option>`).join("");
-  content.innerHTML = panel(
-    "LLM providers",
-    "Bring your own API key. Keys are encrypted at rest and pushed to the box only at runtime.",
-    `<div class="connector-list">${rows}</div>
-     <form id="llm-form" class="settings-form">
-       <h3>Add a provider key</h3>
-       ${field("Provider", `<select id="llm-provider" class="field">${opts}</select>`)}
-       ${field("Label (optional)", `<input id="llm-label" class="field" placeholder="e.g. Personal Anthropic">`)}
-       ${field("API key", `<input id="llm-key" type="password" autocomplete="off" class="field" placeholder="sk-ant-…">`)}
-       ${field("Model", `<input id="llm-model" class="field" placeholder="provider/model">`, "provider/model — sent with every message")}
-       <div class="settings-form-actions"><button class="btn btn-primary" type="submit">Add key</button></div>
-     </form>`,
-  );
-
-  const pSel = content.querySelector("#llm-provider");
-  const keyInp = content.querySelector("#llm-key");
-  const modelInp = content.querySelector("#llm-model");
-  const syncHints = () => {
-    const meta = LLM_PROVIDERS[pSel.value];
-    keyInp.placeholder = meta.keyHint;
-    if (!modelInp.value) modelInp.placeholder = meta.model;
-  };
-  pSel.addEventListener("change", syncHints);
-  syncHints();
-
-  content.querySelector("#llm-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const secret = keyInp.value.trim();
-    if (!secret) return toast("Enter an API key");
-    const provider = pSel.value;
-    const model = modelInp.value.trim() || LLM_PROVIDERS[provider].model;
-    try {
-      await request("/api/connectors", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "llm", provider, label: content.querySelector("#llm-label").value.trim(), config: { model }, secret }),
-      });
-      await reload();
-      announceChange();
-      render();
-      toast("LLM key saved");
-    } catch (err) { toast("Save failed: " + err.message); }
-  });
-
-  content.querySelectorAll(".connector-row[data-id]").forEach((row) => {
-    const id = row.dataset.id;
-    row.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => llmAction(b.dataset.act, id, b)));
-  });
+// Old #llm-form submit: validate key, default the model, POST /api/connectors, reload+announce+render.
+async function addLlm(v) {
+  if (!v.key) return toast("Enter an API key");
+  const model = v.model || LLM_PROVIDERS[v.provider].model;
+  try {
+    await request("/api/connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "llm", provider: v.provider, label: v.label, config: { model }, secret: v.key }),
+    });
+    await reload();
+    announceChange();
+    render();
+    toast("LLM key saved");
+  } catch (err) { toast("Save failed: " + err.message); }
 }
 
 async function llmAction(act, id, anchor) {
@@ -251,180 +195,94 @@ async function llmAction(act, id, anchor) {
 
 // ---------------------------------------------------------------- GitHub
 
-function renderGithub() {
-  const c = byType("github")[0];
-  const cfg = c?.config || {};
-  const authMethod = cfg.authMethod || "pat";
-  const perms = new Set(cfg.repoPermissions || ["contents", "pull_requests"]);
-  const permBoxes = GH_PERMISSIONS.map((p) =>
-    `<label class="check"><input type="checkbox" value="${p}" ${perms.has(p) ? "checked" : ""}> ${esc(p.replace("_", " "))}</label>`).join("");
+// Old #gh-form submit. `existing` is the current github connector (or null); the component parses
+// username/token/repoPermissions. authMethod is fixed to "pat" (OAuth is disabled in the form).
+async function saveGithub(v, existing) {
+  if (!existing && !v.token) return toast("Enter a personal access token");
+  const config = { authMethod: "pat", username: v.username, repoPermissions: v.repoPermissions };
+  try {
+    if (existing) {
+      const body = { config };
+      if (v.token) body.secret = v.token;
+      await request(`/api/connectors/${existing.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } else {
+      await request("/api/connectors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "github", provider: "github", config, secret: v.token }) });
+    }
+    await reload(); announceChange(); render();
+    toast("GitHub saved");
+  } catch (err) { toast("Save failed: " + err.message); }
+}
 
-  content.innerHTML = panel(
-    "GitHub",
-    "Connect a GitHub account so agents can clone, push, and open PRs. Tokens are encrypted at rest.",
-    `<form id="gh-form" class="settings-form">
-       ${c ? `<div class="connector-status">Connected ${c.config?.username ? `as <b>${esc(c.config.username)}</b>` : ""} · token ••••${esc(c.secretLast4 || "")}
-         <button type="button" id="gh-sync" class="btn btn-ghost ml-2">Sync to machine</button></div>` : ""}
-       ${field("Auth method", `
-         <div class="radio-row">
-           <label class="radio"><input type="radio" name="gh-auth" value="pat" ${authMethod === "pat" ? "checked" : ""}> Personal access token</label>
-           <label class="radio is-disabled" title="OAuth requires a registered GitHub App — coming soon"><input type="radio" name="gh-auth" value="oauth" disabled> OAuth (soon)</label>
-         </div>`)}
-       ${field("Username (optional)", `<input id="gh-username" class="field" value="${esc(cfg.username || "")}" placeholder="octocat">`)}
-       ${field("Personal access token", `<input id="gh-token" type="password" autocomplete="off" class="field" placeholder="${c ? esc(secretPlaceholder(c)) : "github_pat_… or ghp_…"}">`)}
-       ${field("Repo permissions", `<div class="check-grid">${permBoxes}</div>`, "Recorded with the connector; enforced when the agent uses the token.")}
-       <div class="settings-form-actions">
-         ${c ? `<button class="btn btn-ghost text-bad" type="button" id="gh-remove">Disconnect</button>` : ""}
-         <button class="btn btn-primary" type="submit">${c ? "Save" : "Connect"}</button>
-       </div>
-     </form>`,
-  );
-
-  content.querySelector("#gh-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const token = content.querySelector("#gh-token").value.trim();
-    if (!c && !token) return toast("Enter a personal access token");
-    const config = {
-      authMethod: "pat",
-      username: content.querySelector("#gh-username").value.trim(),
-      repoPermissions: [...content.querySelectorAll(".check-grid input:checked")].map((i) => i.value),
-    };
-    try {
-      if (c) {
-        const body = { config };
-        if (token) body.secret = token;
-        await request(`/api/connectors/${c.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      } else {
-        await request("/api/connectors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "github", provider: "github", config, secret: token }) });
-      }
-      await reload(); announceChange(); render();
-      toast("GitHub saved");
-    } catch (err) { toast("Save failed: " + err.message); }
-  });
-
-  content.querySelector("#gh-remove")?.addEventListener("click", (e) => removeConnector(c, "GitHub", e.currentTarget));
-  content.querySelector("#gh-sync")?.addEventListener("click", async (e) => {
-    e.target.disabled = true;
-    try {
-      const res = await request("/api/github/sync", { method: "POST" });
-      toast(res.ok ? "Synced to machine — git + gh are authenticated" : res.reason === "machine_off" ? "Machine is off — syncs on next start" : "Sync failed");
-    } catch (err) { toast("Sync failed: " + err.message); }
-    finally { e.target.disabled = false; }
-  });
+// Old #gh-sync handler. The button's disabled-toggle was DOM-side; the component re-renders after
+// reload, so we just run the request + toast (the anchor is unused but kept for signature parity).
+async function syncGithub(anchor) {
+  if (anchor) anchor.disabled = true;
+  try {
+    const res = await request("/api/github/sync", { method: "POST" });
+    toast(res.ok ? "Synced to machine — git + gh are authenticated" : res.reason === "machine_off" ? "Machine is off — syncs on next start" : "Sync failed");
+  } catch (err) { toast("Sync failed: " + err.message); }
+  finally { if (anchor) anchor.disabled = false; }
 }
 
 // ---------------------------------------------------------------- Fly.io
 
-function renderFly() {
-  const c = byType("fly")[0];
-  const cfg = c?.config || {};
-  const sizeOpts = VM_SIZES.map((s) => `<option value="${s}" ${cfg.maxVmSize === s ? "selected" : ""}>${s}</option>`).join("");
-  // The deployment's FLY_API_TOKEN drives machine start/stop today; a BYO token is an override.
-  const envBanner = envMeta.flyToken
-    ? `<div class="connector-status">✓ Using the deployment's Fly token${envMeta.flyOrgSlug ? ` (org <b>${esc(envMeta.flyOrgSlug)}</b>)` : ""} — this powers machine start/stop today. Add a token below only to override it.</div>`
-    : `<div class="connector-status text-bad">No Fly token configured on the deployment. Machine start/stop will fail until one is set.</div>`;
-
-  content.innerHTML = panel(
-    "Fly.io",
-    "Fly runs the machine behind your agents. A bring-your-own token here would override the deployment token (BYO is not yet wired to provisioning).",
-    `<form id="fly-form" class="settings-form">
-       ${envBanner}
-       ${c ? `<div class="connector-status">BYO override saved · token ••••${esc(c.secretLast4 || "")}</div>` : ""}
-       ${field("Fly API token (override)", `<input id="fly-token" type="password" autocomplete="off" class="field" placeholder="${c ? esc(secretPlaceholder(c)) : "FlyV1 …"}">`)}
-       ${field("Organization slug", `<input id="fly-org" class="field" value="${esc(cfg.orgSlug || "")}" placeholder="personal">`)}
-       ${field("Max VM size", `<select id="fly-size" class="field">${sizeOpts}</select>`)}
-       ${field("Max idle minutes", `<input id="fly-idle" type="number" min="1" class="field" value="${esc(cfg.maxIdleMinutes ?? 60)}">`, "Auto-stop idle machines after this many minutes.")}
-       <div class="settings-form-actions">
-         ${c ? `<button class="btn btn-ghost text-bad" type="button" id="fly-remove">Disconnect</button>` : ""}
-         <button class="btn btn-primary" type="submit">${c ? "Save" : "Connect"}</button>
-       </div>
-     </form>`,
-  );
-
-  content.querySelector("#fly-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const token = content.querySelector("#fly-token").value.trim();
-    if (!c && !token) return toast("Enter a Fly API token");
-    const config = {
-      orgSlug: content.querySelector("#fly-org").value.trim(),
-      maxVmSize: content.querySelector("#fly-size").value,
-      maxIdleMinutes: Number(content.querySelector("#fly-idle").value) || 60,
-    };
-    try {
-      if (c) {
-        const body = { config };
-        if (token) body.secret = token;
-        await request(`/api/connectors/${c.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      } else {
-        await request("/api/connectors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "fly", provider: "fly", config, secret: token }) });
-      }
-      await reload(); announceChange(); render();
-      toast("Fly.io saved");
-    } catch (err) { toast("Save failed: " + err.message); }
-  });
-
-  content.querySelector("#fly-remove")?.addEventListener("click", (e) => removeConnector(c, "Fly.io", e.currentTarget));
+// Old #fly-form submit. `existing` is the current fly connector (or null); component parses
+// token/orgSlug/maxVmSize/maxIdleMinutes.
+async function saveFly(v, existing) {
+  if (!existing && !v.token) return toast("Enter a Fly API token");
+  const config = { orgSlug: v.orgSlug, maxVmSize: v.maxVmSize, maxIdleMinutes: v.maxIdleMinutes };
+  try {
+    if (existing) {
+      const body = { config };
+      if (v.token) body.secret = v.token;
+      await request(`/api/connectors/${existing.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } else {
+      await request("/api/connectors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "fly", provider: "fly", config, secret: v.token }) });
+    }
+    await reload(); announceChange(); render();
+    toast("Fly.io saved");
+  } catch (err) { toast("Save failed: " + err.message); }
 }
 
 // ---------------------------------------------------------------- Notifications
 
-function renderNotifications() {
-  const items = byType("notification");
-  const rows = items.length
-    ? items.map((c) => `
-      <div class="connector-row" data-id="${esc(c.id)}">
-        <div class="connector-main">
-          <div class="connector-title">${esc(NOTIFY_PROVIDERS[c.provider] || c.provider)}${c.label ? ` · ${esc(c.label)}` : ""}</div>
-          <div class="connector-sub">webhook ••••${esc(c.secretLast4 || "")}</div>
-        </div>
-        <div class="connector-actions">
-          <button class="btn btn-ghost" data-act="test">Test</button>
-          <button class="btn btn-ghost text-bad" data-act="delete">Remove</button>
-        </div>
-      </div>`).join("")
-    : `<p class="text-muted text-sm">No notification sinks yet. Add a Slack/Discord webhook to get machine + run alerts.</p>`;
-
-  const opts = Object.entries(NOTIFY_PROVIDERS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
-  content.innerHTML = panel(
-    "Notifications",
-    "Alerts for machine start/stop and finished runs, sent to your channels.",
-    `<div class="connector-list">${rows}</div>
-     <form id="notify-form" class="settings-form">
-       <h3>Add a sink</h3>
-       ${field("Type", `<select id="notify-provider" class="field">${opts}</select>`)}
-       ${field("Label (optional)", `<input id="notify-label" class="field" placeholder="e.g. #builds">`)}
-       ${field("Webhook URL", `<input id="notify-url" type="url" class="field" placeholder="https://hooks.slack.com/services/…">`, "Slack/Discord incoming webhook, or any URL that accepts a JSON POST.")}
-       <div class="settings-form-actions"><button class="btn btn-primary" type="submit">Add sink</button></div>
-     </form>`,
-  );
-
-  content.querySelector("#notify-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const url = content.querySelector("#notify-url").value.trim();
-    if (!url) return toast("Enter a webhook URL");
-    try {
-      await request("/api/connectors", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "notification", provider: content.querySelector("#notify-provider").value, label: content.querySelector("#notify-label").value.trim(), secret: url }),
-      });
-      await reload(); render();
-      toast("Sink added");
-    } catch (err) { toast("Save failed: " + err.message); }
-  });
-
-  content.querySelectorAll(".connector-row[data-id]").forEach((row) => {
-    const id = row.dataset.id;
-    row.querySelector('[data-act="delete"]').addEventListener("click", (e) => removeConnector(connectors.find((x) => x.id === id), "sink", e.currentTarget));
-    row.querySelector('[data-act="test"]').addEventListener("click", async (e) => {
-      e.target.disabled = true;
-      try {
-        const { ok } = await request(`/api/connectors/${id}/test`, { method: "POST" });
-        toast(ok ? "Test sent ✓" : "Test failed — check the URL");
-      } catch (err) { toast("Test failed: " + err.message); }
-      finally { e.target.disabled = false; }
+// Old #notify-form submit. NOTE: the original did NOT announceChange() for notifications — preserved.
+async function addNotification(v) {
+  if (!v.url) return toast("Enter a webhook URL");
+  try {
+    await request("/api/connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "notification", provider: v.provider, label: v.label, secret: v.url }),
     });
-  });
+    await reload(); render();
+    toast("Sink added");
+  } catch (err) { toast("Save failed: " + err.message); }
+}
+
+// Old per-row Test handler.
+async function testNotification(id, anchor) {
+  if (anchor) anchor.disabled = true;
+  try {
+    const { ok } = await request(`/api/connectors/${id}/test`, { method: "POST" });
+    toast(ok ? "Test sent ✓" : "Test failed — check the URL");
+  } catch (err) { toast("Test failed: " + err.message); }
+  finally { if (anchor) anchor.disabled = false; }
+}
+
+// ---------------------------------------------------------------- remove (shared)
+
+// Generic remove routed from every section's Remove/Disconnect button. Derives the human label the
+// way the old per-section handlers did (LLM provider name / "GitHub" / "Fly.io" / "sink").
+function removeConnectorById(id, anchor) {
+  const c = connectors.find((x) => x.id === id);
+  if (!c) return;
+  let label;
+  if (c.type === "llm") label = LLM_PROVIDERS[c.provider]?.name || c.provider;
+  else if (c.type === "github") label = "GitHub";
+  else if (c.type === "fly") label = "Fly.io";
+  else label = "sink";
+  return removeConnector(c, label, anchor);
 }
 
 async function removeConnector(c, label, anchor) {
@@ -437,91 +295,41 @@ async function removeConnector(c, label, anchor) {
   } catch (err) { toast("Remove failed: " + err.message); }
 }
 
-// ---------------------------------------------------------------- scaffolded sections
+// ---------------------------------------------------------------- system prompt
+// The box's AGENTS.md: view the current prompt, save an override that persists across machine
+// reboots, or reset to the box default. The component renders the panel from `systemPrompt`
+// (loading/error/source/boxReachable/content); these callbacks own the fetch + module state.
 
-function renderAccount() {
-  content.innerHTML = panel(
-    "Account",
-    "You're signed in with the workspace password.",
-    `<div class="settings-form">
-       <div class="connector-status">Single-user workspace. Multi-user accounts are planned.</div>
-       <div class="settings-form-actions"><a class="btn btn-ghost" href="/logout">Sign out</a></div>
-     </div>`,
-  );
-}
-
-function renderPlaceholder() {
-  const copy = {
-    orgs: ["Organizations / Tenants", "Group projects and members under an organization. Coming in a later pass — this build is single-user."],
-    projects: ["Projects", "Scope sessions, connectors, and budgets to a project. Coming soon."],
-    billing: ["Billing / budgets", "Set spend caps per provider and track token usage. Coming soon."],
-  }[active] || ["Settings", ""];
-  content.innerHTML = panel(copy[0], copy[1], `<div class="settings-soon">🚧 Not built yet</div>`);
-}
-
-const RENDERERS = {
-  account: renderAccount,
-  llm: renderLlm,
-  github: renderGithub,
-  fly: renderFly,
-  notifications: renderNotifications,
-  system: renderSystemPrompt,
-  orgs: renderPlaceholder,
-  projects: renderPlaceholder,
-  billing: renderPlaceholder,
-};
-
-// System prompt (the box's AGENTS.md). View the current prompt, save an override that persists
-// across machine reboots, or reset to the box default.
-async function renderSystemPrompt() {
-  content.innerHTML = panel("System prompt", "Loading…", "");
-  let data;
+async function loadSystemPrompt() {
+  systemPrompt = { loading: true };
+  render();
   try {
-    data = await request("/api/system-prompt");
+    systemPrompt = await request("/api/system-prompt");
   } catch {
-    content.innerHTML = panel("System prompt", "Could not load the system prompt.", "");
-    return;
+    systemPrompt = { error: true };
   }
-  const isCustom = data.source === "custom";
-  const note = isCustom
-    ? "Using your custom prompt (overrides the box default; persists across reboots)."
-    : data.boxReachable
-      ? "Showing the box default. Edit and save to override it."
-      : "Machine is off — showing your saved prompt or empty. Start the machine to load the live default.";
+  render();
+}
 
-  content.innerHTML = panel(
-    "System prompt",
-    "The agent instructions (AGENTS.md) loaded for every session — includes the UI-artifact protocol.",
-    `<form id="sp-form" class="settings-form">
-       <div class="connector-status">${esc(note)}</div>
-       ${field("Prompt", `<textarea id="sp-text" class="field" rows="16" style="min-height:280px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px"></textarea>`)}
-       <div class="settings-form-actions">
-         <button type="button" id="sp-reset" class="btn btn-ghost text-bad" ${isCustom ? "" : "disabled"}>Reset to default</button>
-         <span class="flex-1"></span>
-         <button type="submit" class="btn btn-primary">Save override</button>
-       </div>
-     </form>`,
-  );
-  content.querySelector("#sp-text").value = data.content || "";
+async function saveSystemPrompt(content2) {
+  try {
+    const res = await request("/api/system-prompt", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: content2 }),
+    });
+    toast(res.applied ? "Saved and applied to the machine" : "Saved — applies when the machine starts");
+    loadSystemPrompt();
+  } catch (err) { toast("Save failed: " + err.message); }
+}
 
-  content.querySelector("#sp-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const body = JSON.stringify({ content: content.querySelector("#sp-text").value });
-    try {
-      const res = await request("/api/system-prompt", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
-      toast(res.applied ? "Saved and applied to the machine" : "Saved — applies when the machine starts");
-      render();
-    } catch (err) { toast("Save failed: " + err.message); }
-  });
-
-  content.querySelector("#sp-reset").addEventListener("click", async () => {
-    if (!confirm("Reset to the box default prompt?")) return;
-    try {
-      await request("/api/system-prompt", { method: "DELETE" });
-      toast("Reset to default");
-      render();
-    } catch (err) { toast("Reset failed: " + err.message); }
-  });
+async function resetSystemPrompt() {
+  if (!confirm("Reset to the box default prompt?")) return;
+  try {
+    await request("/api/system-prompt", { method: "DELETE" });
+    toast("Reset to default");
+    loadSystemPrompt();
+  } catch (err) { toast("Reset failed: " + err.message); }
 }
 
 // ---------------------------------------------------------------- wiring

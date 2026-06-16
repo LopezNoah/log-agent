@@ -18,5 +18,6 @@ export const state = {
     selectedMtime: "",
     loading: false,
     dirty: false,
+    editorOpen: false,
   },
 };
